@@ -1,9 +1,11 @@
+import MainSection from "./_common/main-section";
 
 function Home() {
     return (
-        <div className="Home">
-            Home content
-        </div>
+        <>
+            {/* 主页的内容 */}
+            <MainSection />
+        </>
     );
 }
 

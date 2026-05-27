@@ -12,29 +12,27 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-export function ModeToggle() {
+export default function ModeToggle() {
     const { setTheme } = useTheme()
 
     return (
         <DropdownMenu>
-            <DropdownMenuTrigger
-                render={
-                    <Button variant="outline" size="icon">
-                        <Sun className="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
-                        <Moon className="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
-                        <span className="sr-only">Toggle theme</span>
-                    </Button>
-                }
-            />
-            <DropdownMenuContent align="end">
+            <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="icon">
+                    <Sun className="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
+                    <Moon className="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
+                    <span className="sr-only">Toggle theme</span>
+                </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="right" sideOffset={8} className="min-w-40 rounded-lg">
                 <DropdownMenuItem onClick={() => setTheme("light")}>
-                    Light
+                    光亮
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setTheme("dark")}>
-                    Dark
+                    暗黑
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setTheme("system")}>
-                    System
+                    系统
                 </DropdownMenuItem>
             </DropdownMenuContent>
         </DropdownMenu>

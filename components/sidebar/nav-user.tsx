@@ -27,7 +27,7 @@ type NavUserProps = {
     onSignOut: () => void;
 };
 
-const NavUser = ({ user, isLoading, isSigningOut, onSignOut }: NavUserProps) => {
+function NavUser({ user, isLoading, isSigningOut, onSignOut }: NavUserProps) {
     const { isMobile } = useSidebar();
 
     return (

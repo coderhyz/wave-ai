@@ -21,6 +21,7 @@ import NavMenu from "@/components/sidebar/nav-menu";
 import NavUser from "@/components/sidebar/nav-user";
 import NavNotes from "@/components/sidebar/nav-notes";
 import ModeToggle from "@/components/mode-toggle";
+import NoteDialog from "@/components/note-dialog";
 // 菜单项
 const navMenu = [
     {
@@ -47,9 +48,10 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const [isSigningOut, setIsSigningOut] = useState<boolean>(false);
     // Better Auth 认证客户端 Hook
     const { useSession, signOut } = authClient;
-    const { data: session, isPending } = useSession();
+    const { data: session, isPending: isLoading } = useSession();
 
     const user = session?.user;
+    // 用户信息
     const userInfo = {
         name: user?.name || "",
         email: user?.email || ""
@@ -76,7 +78,9 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
 
     return (
 
-        <Sidebar className="z-99" {...props}>
+        <>
+            <NoteDialog />
+            <Sidebar className="z-99" {...props}>
             {/* 导航栏头部 */}
             <SidebarHeader>
                 <div className="w-full flex items-center justify-between">
@@ -100,13 +104,14 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <hr className="border-border mx-2 -mt-px" />
                 {/* 底部用户信息栏 */}
                 <NavUser
-                    isLoading={isPending}
+                    isLoading={isLoading}
                     user={userInfo}
                     isSigningOut={isSigningOut}
                     onSignOut={handleLogout}
                 />
             </SidebarFooter>
-        </Sidebar>
+            </Sidebar>
+        </>
     );
 }
 

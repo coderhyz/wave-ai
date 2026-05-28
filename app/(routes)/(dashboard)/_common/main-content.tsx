@@ -1,7 +1,7 @@
 
 function MainContent({ children }: { children: React.ReactNode }) {
     return (
-        <div className="w-full h-auto overflow-y-auto">
+        <div className="min-h-0 w-full flex-1">
             {children}
         </div>
     );

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { Suspense } from "react";
 import {
     SidebarGroup,
     SidebarGroupAction,
@@ -7,79 +7,100 @@ import {
     SidebarMenu,
     SidebarMenuButton,
     SidebarMenuItem,
+    SidebarMenuSkeleton,
 } from "../ui/sidebar";
-import { RiAddLine, RiFileTextLine, RiLoader5Fill } from "@remixicon/react";
-// import { useCreateNote, useNotes } from "@/features/use-note";
-// import LoaderOverlay from "../loader-overlay";
-// import useNoteId from "@/hooks/use-note-id";
+import { RiAddLine, RiFileTextLine } from "@remixicon/react";
+import { useCreateNote, useSuspenseNotes } from "@/hooks/use-note";
+import useNoteId from "@/hooks/use-note-id";
 
-const NavNotes = () => {
-    // const { noteId, setNoteId } = useNoteId();
-    // const { data, isPending } = useNotes();
-    // const { mutate, isPending: isLoading } = useCreateNote();
+function NavNotesContent() {
+    const { data } = useSuspenseNotes();
+    const { setNoteId, noteId } = useNoteId();
+    const { mutate, isPending } = useCreateNote();
+    const notes = data?.notes ?? [];
 
-    // const notes = data?.data ?? [];
+    const onCreate = () => {
+        if (isPending) return;
 
-    // const onCreate = () => {
-    //     mutate({
-    //         title: "Untitled",
-    //         content: "",
-    //     });
-    // };
+        mutate({
+            title: "Untitled",
+            content: "",
+        });
+    };
 
-    // const onClick = (id: string) => {
-    //     setNoteId(id);
-    // };
     return (
-        <>
-            {/* <LoaderOverlay text="Creating note..." show={isLoading} /> */}
-            <SidebarGroup>
-                <SidebarGroup className="px-0 " >
-                    <SidebarGroupLabel>
-                        <h5>Notes</h5>
-                    </SidebarGroupLabel>
+        <SidebarGroup>
+            <SidebarGroup className="px-0">
+                <SidebarGroupLabel>
+                    <h5>笔记</h5>
+                </SidebarGroupLabel>
 
-                    <SidebarGroupAction
-                        className="mt-[1.5px] flex items-center size-5.5 rounded-md bg-primary/20 border cursor-pointer"
-                    // onClick={onCreate}
-                    >
-                        <RiAddLine className="size-5!" />
-                        <span className="sr-only">Add Notes</span>
-                    </SidebarGroupAction>
-                </SidebarGroup>
-                <SidebarGroupContent className="w-full h-auto min-h-32 max-h-90  overflow-y-auto">
-                    <div>No Notes</div>
-                    {/* <SidebarMenu>
-                        {notes?.length === 0 ? (
-                            <div>No Notes</div>
-                        ) : isPending ? (
-                            <div className="flex items-center justify-center">
-                                <RiLoader5Fill className="w-8 h-8 animate-spin text-primary" />
-                            </div>
-                        ) : (
-                            notes?.map((note) => {
-                                const isActive = note.id === noteId;
-                                return (
-                                    <SidebarMenuItem key={note.id}>
-                                        <SidebarMenuButton
-                                            className="flex items-center w-full"
-                                            isActive={isActive}
-                                            onClick={() => onClick(note.id)}
-                                        >
-                                            <span className="w-8 h-8 bg-secondary rounded-lg flex items-center justify-center">
-                                                <RiFileTextLine className="w-4 h-4 text-primary" />
-                                            </span>
-                                            <h5 className="flex-1 truncate">{note.title}</h5>
-                                        </SidebarMenuButton>
-                                    </SidebarMenuItem>
-                                );
-                            })
-                        )}
-                    </SidebarMenu> */}
-                </SidebarGroupContent>
+                <SidebarGroupAction
+                    className="mt-[1.5px] flex size-5.5 cursor-pointer items-center rounded-md border bg-primary/20 disabled:pointer-events-none disabled:opacity-50"
+                    onClick={onCreate}
+                    aria-disabled={isPending}
+                >
+                    <RiAddLine className="size-5!" />
+                    <span className="sr-only">创建笔记</span>
+                </SidebarGroupAction>
             </SidebarGroup>
-        </>
-    );
-};
 
-export default NavNotes;
+            <SidebarGroupContent className="h-auto max-h-90 min-h-32 w-full overflow-y-auto">
+                <SidebarMenu>
+                    {notes.length === 0 ? (
+                        <div className="px-2 py-2 text-sm text-muted-foreground">
+                            还没有笔记，请创建。
+                        </div>
+                    ) : (
+
+                        notes.map((note) => {
+                            const isActive = note.id === noteId;
+                            return (
+                                // let isActive = note.id === noteId;
+                                // 笔记部分
+                                <SidebarMenuItem key={note.id}>
+                                    <SidebarMenuButton isActive={isActive} className="flex w-full items-center" onClick={() => setNoteId(note.id)}>
+                                        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-secondary">
+                                            <RiFileTextLine className="h-4 w-4 text-primary" />
+                                        </span>
+                                        <h5 className="flex-1 truncate">{note.title}</h5>
+                                    </SidebarMenuButton>
+                                </SidebarMenuItem>
+                            )
+                        })
+                    )}
+                </SidebarMenu>
+            </SidebarGroupContent>
+        </SidebarGroup>
+    );
+}
+
+function NavNotesFallback() {
+    return (
+        <SidebarGroup>
+            <SidebarGroup className="px-0">
+                <SidebarGroupLabel>
+                    <h5>笔记</h5>
+                </SidebarGroupLabel>
+            </SidebarGroup>
+
+            <SidebarGroupContent className="h-auto max-h-90 min-h-32 w-full overflow-y-auto">
+                <SidebarMenu>
+                    {Array.from({ length: 4 }).map((_, index) => (
+                        <SidebarMenuItem key={index}>
+                            <SidebarMenuSkeleton showIcon />
+                        </SidebarMenuItem>
+                    ))}
+                </SidebarMenu>
+            </SidebarGroupContent>
+        </SidebarGroup>
+    );
+}
+//加载骨架屏
+export default function NavNotes() {
+    return (
+        <Suspense fallback={<NavNotesFallback />}>
+            <NavNotesContent />
+        </Suspense>
+    );
+}

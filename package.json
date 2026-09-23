@@ -15,8 +15,8 @@
     "postinstall": "prisma generate --no-engine"
   },
   "dependencies": {
-    "@ai-sdk/alibaba": "^1.0.26",
-    "@ai-sdk/deepseek": "^2.0.35",
+    "@ai-sdk/alibaba": "^0.0.30",
+    "@ai-sdk/deepseek": "^1.0.58",
     "@ai-sdk/gateway": "^1.0.23",
     "@ai-sdk/react": "^2.0.23",
     "@base-ui/react": "^1.5.0",
@@ -26,6 +26,9 @@
     "@prisma/extension-accelerate": "^2.0.2",
     "@remixicon/react": "^4.6.0",
     "@tanstack/react-query": "^5.85.5",
+    "@tiptap/pm": "^3.31.3",
+    "@tiptap/react": "^3.31.3",
+    "@tiptap/starter-kit": "^3.31.3",
     "ai": "^5.0.23",
     "better-auth": "^1.6.11",
     "class-variance-authority": "^0.7.1",

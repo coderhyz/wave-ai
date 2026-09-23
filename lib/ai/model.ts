@@ -1,29 +1,32 @@
-export interface ChatModel {
-    id: string;
-    name: string;
-    description: string;
-}
-// 可用的模型
-export const chatModels: ChatModel[] = [
-    {
-        id: "deepseek-v4-pro", // Updated to actual available model
-        name: "DeepSeek V4 Pro",
-        description:
-            "DeepSeek's most intelligent model with tool use and real-time search",
-    },
-    {
-        id: "qwen-plus", // Updated to actual available model
-        name: "Qwen Plus",
-        description: "Alibaba's most intelligent model with tool use and real-time search",
-    },
+export const CHAT_MODEL_IDS = ["deepseek-v4-pro", "qwen-plus"] as const
 
-];
-// 默认使用第一个模型
-export const DEFAULT_MODEL_ID = chatModels[0].id;
-// 开发环境使用的模型，方便调试和测试
-export const DEVELOPMENT_CHAT_MODEL = "deepseek-v4-pro";
-// 模型选项
+export type ChatModelId = (typeof CHAT_MODEL_IDS)[number]
+
+export interface ChatModel {
+  id: ChatModelId
+  name: string
+  description: string
+}
+
+export const chatModels: readonly ChatModel[] = [
+  {
+    id: "deepseek-v4-pro",
+    name: "DeepSeek V4 Pro",
+    description:
+      "DeepSeek是一个强大的多模态大语言模型，支持文本、图像、音频等多种输入类型，能够进行复杂的推理和生成任务。",
+  },
+  {
+    id: "qwen-plus",
+    name: "Qwen Plus",
+    description:
+      "Alibaba是阿里巴巴推出的多模态大语言模型，支持文本、图像、音频等多种输入类型，能够进行复杂的推理和生成任务。",
+  },
+]
+
+export const DEFAULT_MODEL_ID: ChatModelId = CHAT_MODEL_IDS[0]
+export const DEVELOPMENT_CHAT_MODEL: ChatModelId = "deepseek-v4-pro"
+
 export const MODEL_OPTIONS = chatModels.map((model) => ({
-    value: model.id,
-    label: model.name,
-}));
+  value: model.id,
+  label: model.name,
+}))

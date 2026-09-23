@@ -1,22 +1,22 @@
-import type { Metadata } from "next";
-import { Geist } from "next/font/google";
-import "./globals.css";
-import Providers from "@/context/providers";
+import type { Metadata } from "next"
+import { Geist } from "next/font/google"
+import "./globals.css"
+import Providers from "@/context/providers"
 // 字体配置
 const geist = Geist({
   variable: "--font-sans",
   subsets: ["latin"],
-});
+})
 // 页面元数据
 export const metadata: Metadata = {
   title: "Wave AI Agent",
   description: "您的的个人聊天助手-可以解答问题、提供建议",
-};
+}
 // 根布局
 export default function RootLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: React.ReactNode
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -27,5 +27,5 @@ export default function RootLayout({
         <Providers>{children}</Providers>
       </body>
     </html>
-  );
+  )
 }

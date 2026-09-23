@@ -1,12 +1,12 @@
-import MainSection from "./_common/main-section";
+import MainSection from "./_common/main-section"
 
 function Home() {
-    return (
-        <>
-            {/* 主页的内容 */}
-            <MainSection />
-        </>
-    );
+  return (
+    <>
+      {/* 主页的内容 */}
+      <MainSection />
+    </>
+  )
 }
 
-export default Home;
+export default Home

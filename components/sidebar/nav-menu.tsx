@@ -18,7 +18,6 @@ function NavMenu({ menus }: { menus: Menu[] }) {
                 {menus?.map((menu) => {
                     // 判断当前路径是否与菜单项的 URL 匹配，以确定是否为选中状态
                     const isActive = pathname === menu.url;
-
                     return (
                         <SidebarMenuItem
                             key={menu.title}

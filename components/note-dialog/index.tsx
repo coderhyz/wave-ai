@@ -1,14 +1,16 @@
 "use client";
 import React from "react";
 import useNoteId from "@/hooks/use-note-id";
+import { XIcon } from "lucide-react";
+import { Button } from "../ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet";
 import NoteView from "./note-view";
 
-const NoteDialog = () => {
+function NoteDialog() {
     const { noteId, clearNoteId } = useNoteId();
-
     const isOpen = Boolean(noteId);
 
+    // 处理侧边栏打开状态变化的函数
     const handleOpenChange = (open: boolean) => {
         if (!open) {
             clearNoteId();
@@ -19,13 +21,18 @@ const NoteDialog = () => {
         <Sheet open={isOpen} onOpenChange={handleOpenChange}>
             <SheetContent
                 side="right"
-                className="p-0 border-l lg:w-1/2 sm:max-w-[50vw]"
+                showCloseButton={false}
+                overlayClassName="bg-transparent backdrop-blur-0"
+                // onInteractOutside={(event) => event.preventDefault()}
+                className="gap-0 border-l p-0 shadow-2xl duration-300 ease-out data-[side=right]:w-full data-[side=right]:max-w-none data-[side=right]:data-closed:slide-out-to-right-full data-[side=right]:data-open:slide-in-from-right-full data-[side=right]:sm:w-[50vw] data-[side=right]:sm:max-w-none data-[side=right]:lg:w-1/2"
             >
-                <SheetHeader className="py-2 border-b bg-muted px-4">
-                    <SheetTitle>Note</SheetTitle>
+                <SheetHeader className="sr-only">
+                    <SheetTitle>没有内容</SheetTitle>
                 </SheetHeader>
-                <div className="flex-1 min-h-20 max-h-screen overflow-y-auto">
-                    {/* {noteId && <NoteView noteId={noteId} />} */}
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                    {/* 笔记内容 */}
+                    {noteId && <NoteView noteId={noteId} />}
+
                 </div>
             </SheetContent>
         </Sheet>

@@ -92,21 +92,22 @@ export const useUpdateNote = () => {
         { id: string; json: RequestUpdateNoteType["json"] }
     >({
         mutationFn: async ({ id, json }) => {
-            const response = await api.note.update[":id"]["$patch"]({
+            // 更新笔记
+            const response = await api.note.update[":id"].$patch({
                 param: { id },
                 json,
             });
             return await response.json();
         },
         onSuccess: () => {
-            toast.success("Changes Saved!");
+            toast.success("笔记保存成功");
             queryClient.invalidateQueries({
                 queryKey: ["notes"],
                 refetchType: "all",
             });
         },
         onError: (error) => {
-            toast.error(error?.message ?? "Failed to update note");
+            toast.error(error?.message ?? "保存笔记失败");
         },
     });
 };

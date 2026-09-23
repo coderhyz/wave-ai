@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import Link from "next/link";
+import { useAuthToken } from "@/hooks/use-auth-token";
 // 登录表单的验证模式
 const signInSchema = z.object({
     email: z.email("请输入有效的邮箱地址"),
@@ -41,6 +42,7 @@ function SignInForm() {
             password: "",
         },
     });
+    // 登录表单提交处理函数
     async function onSubmit(data: SignInFormData) {
         try {
             await authClient.signIn.email({
@@ -52,7 +54,9 @@ function SignInForm() {
                     onRequest: () => {
                         setIsLoading(true);
                     },
-                    onSuccess: () => {
+                    onSuccess: (ctx) => {
+                        const authToken = ctx.response.headers.get("set-auth-token");
+                        useAuthToken.getState().setBearerToken(authToken);
                         // 登录成功后，重定向到 /home 页面
                         router.push("/home");
                         setIsLoading(false);
@@ -63,7 +67,6 @@ function SignInForm() {
                     }
                 }
             )
-            router.push("/auth/sign-in");
         }
         catch (error) {
             console.error("登录失败:", error);
@@ -78,10 +81,12 @@ function SignInForm() {
     return (
         <div className="flex flex-col gap-6 w-full max-w-md ">
             <Card className="bg-transparent! border-0">
+                {/* 卡片头部 */}
                 <CardHeader className="text-center">
                     <CardTitle className="text-2xl font-bold">登录</CardTitle>
                     <CardDescription>请输入您的信息进行登录</CardDescription>
                 </CardHeader>
+                {/* 卡片内容 */}
                 <CardContent>
                     {/* 登录表单内容 */}
                     <Form {...signInForm} >

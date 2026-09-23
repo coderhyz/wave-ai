@@ -18,7 +18,7 @@ function MainSection() {
             </div>
             {/* 聊天部分 */}
             {/* 笔记部分 */}
-            <div className="w-full pt-7 ">
+            <div className="w-full mt-7">
                 <h2 className="text-sm  dark:text-gray-300">
                     这里是笔记部分
                 </h2>

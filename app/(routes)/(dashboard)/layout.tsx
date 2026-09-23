@@ -7,6 +7,7 @@ import { auth } from "@/lib/auth"; // path to your Better Auth server instance
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import MainContent from "./_common/main-content"; // path to your main content component
+import NoteDialog from '@/components/note-dialog';
 async function DashBoardLayout({ children }: { children: React.ReactNode }) {
     const session = await auth.api.getSession({
         headers: await headers() // you need to pass the headers object.
@@ -31,6 +32,7 @@ async function DashBoardLayout({ children }: { children: React.ReactNode }) {
                         <MainContent>
                             {children}
                         </MainContent>
+                        <NoteDialog />
                     </SidebarInset>
                 </SidebarProvider>
             </NuqsAdapter>

@@ -3,6 +3,7 @@ import { noteRoute } from './note'
 import { HTTPException } from 'hono/http-exception'
 import { handle } from 'hono/vercel'
 import { getAuthUser } from '@/lib/hono/hono-middware'
+import { chatRoute } from './chat'
 
 export const runtime = "nodejs"
 
@@ -20,6 +21,7 @@ app.onError((err, c) => {
 const routes = app
     .basePath("/api")
     .route("/note", noteRoute)
+    .route("/chat", chatRoute)
     .get("/", getAuthUser, (c) => {
         return c.json({
             message: "Hello from Wave AI",

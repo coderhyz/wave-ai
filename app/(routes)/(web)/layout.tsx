@@ -3,11 +3,11 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 async function WebLayout({ children }: { children: React.ReactNode }) {
-    // 服务端的用法
+    // 获取当前用户会话
     const session = await auth.api.getSession({
         headers: await headers()
     });
-
+    // 如果用户已登录，重定向到主页
     if (session) {
         return redirect("/home");
     }

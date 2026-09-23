@@ -1,4 +1,6 @@
-import React, { Suspense } from "react";
+"use client";
+
+import React from "react";
 import {
     SidebarGroup,
     SidebarGroupAction,
@@ -10,18 +12,22 @@ import {
     SidebarMenuSkeleton,
 } from "../ui/sidebar";
 import { RiAddLine, RiFileTextLine } from "@remixicon/react";
-import { useCreateNote, useSuspenseNotes } from "@/hooks/use-note";
+import { useCreateNote, useNotes } from "@/hooks/use-note";
 import useNoteId from "@/hooks/use-note-id";
 
 function NavNotesContent() {
-    const { data } = useSuspenseNotes();
+    const { data, isLoading, isError } = useNotes();
     const { setNoteId, noteId } = useNoteId();
     const { mutate, isPending } = useCreateNote();
     const notes = data?.notes ?? [];
 
+    if (isLoading) {
+        return <NavNotesFallback />;
+    }
+
     const onCreate = () => {
         if (isPending) return;
-
+        // 创建笔记参数
         mutate({
             title: "Untitled",
             content: "",
@@ -47,7 +53,11 @@ function NavNotesContent() {
 
             <SidebarGroupContent className="h-auto max-h-90 min-h-32 w-full overflow-y-auto">
                 <SidebarMenu>
-                    {notes.length === 0 ? (
+                    {isError ? (
+                        <div className="px-2 py-2 text-sm text-muted-foreground">
+                            Failed to load notes.
+                        </div>
+                    ) : notes.length === 0 ? (
                         <div className="px-2 py-2 text-sm text-muted-foreground">
                             还没有笔记，请创建。
                         </div>
@@ -98,9 +108,5 @@ function NavNotesFallback() {
 }
 //加载骨架屏
 export default function NavNotes() {
-    return (
-        <Suspense fallback={<NavNotesFallback />}>
-            <NavNotesContent />
-        </Suspense>
-    );
+    return <NavNotesContent />;
 }

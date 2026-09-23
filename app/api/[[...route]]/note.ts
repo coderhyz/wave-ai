@@ -4,7 +4,7 @@ import { HTTPException } from 'hono/http-exception'
 import z from "zod";
 import { getAuthUser } from '@/lib/hono/hono-middware';
 import prisma from '@/lib/prisma';
-// 
+// 传来的参数校验
 const noteSchema = z.object({
     title: z.string().min(1),
     content: z.string(),
@@ -114,7 +114,17 @@ export const noteRoute = new Hono()
                 }),
             ])
 
-            return c.json({ success: true, notes: allNotes, totalCount });
+            return c.json({
+                success: true,
+                notes: allNotes,
+                pagination: {
+                    total: totalCount,
+                    page: page,
+                    limit: limit,
+                    total_pages: Math.ceil(totalCount / limit),
+                    skip: (page - 1) * limit
+                }
+            });
         } catch (error) {
             console.log(error);
             throw new HTTPException(500, { message: "Failed to retrieve notes" });
@@ -136,6 +146,7 @@ export const noteRoute = new Hono()
             return c.json({
                 success: true,
                 data: note,
+
             });
         } catch (error) {
             if (error instanceof HTTPException) {

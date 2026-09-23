@@ -19,7 +19,6 @@ const Providers = ({ children }: Props) => {
                 disableTransitionOnChange
             >
                 {children}
-                {/*  */}
                 <Toaster position="top-center" duration={3000} richColors />
             </ThemeProvider>
         </QueryProvider>

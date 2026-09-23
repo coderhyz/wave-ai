@@ -22,13 +22,16 @@ export const getAuthUser = createMiddleware<Env>(async (c, next) => {
             headers: c.req.raw.headers,
         });
         if (!session) {
-            throw new HTTPException(401, { message: "unauthorized" });
+            throw new HTTPException(401, { message: "未认证" });
         }
         // 如果 session 存在，将用户信息存储在上下文中，以便后续处理使用
         c.set("user", session.user);
         await next();
     } catch (error) {
         console.log(error);
-        throw new HTTPException(401, { message: "unauthorized" });
+        if (error instanceof HTTPException) {
+            throw error;
+        }
+        throw new HTTPException(401, { message: "未认证" });
     }
 });

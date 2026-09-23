@@ -20,8 +20,8 @@ import { toast } from "sonner";
 import NavMenu from "@/components/sidebar/nav-menu";
 import NavUser from "@/components/sidebar/nav-user";
 import NavNotes from "@/components/sidebar/nav-notes";
-import ModeToggle from "@/components/mode-toggle";
-import NoteDialog from "@/components/note-dialog";
+// import ModeToggle from "@/components/mode-toggle";
+// import NoteDialog from "@/components/note-dialog";
 // 菜单项
 const navMenu = [
     {
@@ -60,6 +60,7 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const handleLogout = () => {
         if (isSigningOut) return;
         setIsSigningOut(true);
+        // 退出登录
         signOut({
             fetchOptions: {
                 onSuccess: () => {
@@ -79,37 +80,37 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     return (
 
         <>
-            <NoteDialog />
+            {/* <NoteDialog /> */}
             <Sidebar className="z-99" {...props}>
-            {/* 导航栏头部 */}
-            <SidebarHeader>
-                <div className="w-full flex items-center justify-between">
-                    <Logo url="/home" />
-                    <SidebarTrigger className="-ms-4" />
-                </div>
-                {/* 分割线 */}
-                <hr className="border-border mx-2 -mt-px" />
-                {/* {Search Button} */}
-            </SidebarHeader>
-            {/* 导航栏内容 */}
-            <SidebarContent className="px-2 pt-2 overflow-x-hidden">
-                {/* 导航菜单 */}
-                <NavMenu menus={navMenu} />
-                {/* 笔记列表 */}
-                <NavNotes />
+                {/* 导航栏头部 */}
+                <SidebarHeader>
+                    <div className="w-full flex items-center justify-between">
+                        <Logo url="/home" />
+                        <SidebarTrigger className="-ms-4" />
+                    </div>
+                    {/* 分割线 */}
+                    <hr className="border-border mx-2 -mt-px" />
+                    {/* {Search Button} */}
+                </SidebarHeader>
+                {/* 导航栏内容 */}
+                <SidebarContent className="px-2 pt-2 overflow-x-hidden">
+                    {/* 导航菜单 */}
+                    <NavMenu menus={navMenu} />
+                    {/* 笔记列表 */}
+                    <NavNotes />
 
-            </SidebarContent>
-            {/* 导航栏底部 */}
-            <SidebarFooter>
-                <hr className="border-border mx-2 -mt-px" />
-                {/* 底部用户信息栏 */}
-                <NavUser
-                    isLoading={isLoading}
-                    user={userInfo}
-                    isSigningOut={isSigningOut}
-                    onSignOut={handleLogout}
-                />
-            </SidebarFooter>
+                </SidebarContent>
+                {/* 导航栏底部 */}
+                <SidebarFooter>
+                    <hr className="border-border mx-2 -mt-px" />
+                    {/* 底部用户信息栏 */}
+                    <NavUser
+                        isLoading={isLoading}
+                        user={userInfo}
+                        isSigningOut={isSigningOut}
+                        onSignOut={handleLogout}
+                    />
+                </SidebarFooter>
             </Sidebar>
         </>
     );

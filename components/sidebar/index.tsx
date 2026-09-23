@@ -15,21 +15,22 @@ import { authClient } from "@/lib/auth-client"
 import { toast } from "sonner"
 import NavMenu from "@/components/sidebar/nav-menu"
 import NavUser from "@/components/sidebar/nav-user"
-import NavNotes from "@/components/sidebar/nav-notes"
+import NavChats from "@/components/sidebar/nav-chats"
 // import ModeToggle from "@/components/mode-toggle";
 // import NoteDialog from "@/components/note-dialog";
 // 菜单项
 const navMenu = [
   {
-    title: "仪表盘",
-    url: "/home",
-    icon: RiScanLine,
-  },
-  {
-    title: "新建对话",
+    title: "AI对话",
     url: "/chat",
     icon: RiChatAiLine,
   },
+  {
+    title: "知识库",
+    url: "/home",
+    icon: RiScanLine,
+  },
+
   {
     title: "设置",
     url: "/settings",
@@ -45,7 +46,7 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   // Better Auth 认证客户端 Hook
   const { useSession, signOut } = authClient
   const { data: session, isPending: isLoading } = useSession()
-
+  // 用户信息
   const user = session?.user
   // 用户信息
   const userInfo = {
@@ -91,8 +92,8 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <SidebarContent className="overflow-x-hidden px-2 pt-2">
           {/* 导航菜单 */}
           <NavMenu menus={navMenu} />
-          {/* 笔记列表 */}
-          <NavNotes />
+          {/* AI 对话列表；笔记列表暂时不显示。 */}
+          <NavChats />
         </SidebarContent>
         {/* 导航栏底部 */}
         <SidebarFooter>

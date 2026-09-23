@@ -55,11 +55,12 @@ export const chatRoute = new Hono()
           message: rawMessage,
           selectedModelId,
           selectedToolName,
+          trigger,
         } = c.req.valid("json")
 
         if (selectedToolName !== null) {
           throw new HTTPException(400, {
-            message: "Tools are not available yet",
+            message: "所选择的工具暂不支持",
           })
         }
 
@@ -80,7 +81,7 @@ export const chatRoute = new Hono()
           metadata: message.metadata,
         })
 
-        const storedMessages = await prisma.message.findMany({
+        let storedMessages = await prisma.message.findMany({
           where: { chatId: id },
           orderBy: { createdAt: "asc" },
         })
@@ -90,7 +91,21 @@ export const chatRoute = new Hono()
             (storedMessage) => storedMessage.id === message.id
           )
 
-          if (messageIndex !== storedMessages.length - 1) {
+          if (trigger === "regenerate-message") {
+            const laterMessageIds = storedMessages
+              .slice(messageIndex + 1)
+              .map((storedMessage) => storedMessage.id)
+
+            if (laterMessageIds.length > 0) {
+              await prisma.message.deleteMany({
+                where: {
+                  chatId: id,
+                  id: { in: laterMessageIds },
+                },
+              })
+              storedMessages = storedMessages.slice(0, messageIndex + 1)
+            }
+          } else if (messageIndex !== storedMessages.length - 1) {
             throw new HTTPException(409, {
               message: "This message has already been processed",
             })
@@ -101,7 +116,7 @@ export const chatRoute = new Hono()
           messages: storedMessages.map(toUIMessage),
         })
         const assistantCreatedAt = new Date().toISOString()
-
+        // 调用模型生成回复，并将结果流式返回给客户端，同时在生成完成后保存到数据库
         const result = streamText({
           model: myProvider.languageModel(selectedModelId),
           system: CHAT_SYSTEM_PROMPT,
@@ -172,18 +187,25 @@ export const chatRoute = new Hono()
         const { cursor, limit } = c.req.valid("query")
         const chats = await prisma.chat.findMany({
           where: { userId: user.id },
-          orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+          orderBy: [
+            { isPinned: "desc" },
+            { pinnedAt: "desc" },
+            { updatedAt: "desc" },
+            { id: "desc" },
+          ],
           take: limit + 1,
           ...(cursor
             ? {
-              cursor: { id: cursor },
-              skip: 1,
-            }
+                cursor: { id: cursor },
+                skip: 1,
+              }
             : {}),
           select: {
             id: true,
             title: true,
             modelId: true,
+            isPinned: true,
+            pinnedAt: true,
             createdAt: true,
             updatedAt: true,
             _count: {
@@ -243,10 +265,18 @@ export const chatRoute = new Hono()
       try {
         const user = c.get("user")
         const { id } = c.req.valid("param")
-        const { title } = c.req.valid("json")
+        const { title, isPinned } = c.req.valid("json")
         const result = await prisma.chat.updateMany({
           where: { id, userId: user.id },
-          data: { title },
+          data: {
+            ...(title !== undefined ? { title } : {}),
+            ...(isPinned !== undefined
+              ? {
+                  isPinned,
+                  pinnedAt: isPinned ? new Date() : null,
+                }
+              : {}),
+          },
         })
 
         if (result.count === 0) {

@@ -8,6 +8,10 @@ import { headers } from "next/headers"
 import { redirect } from "next/navigation"
 import MainContent from "./_common/main-content" // path to your main content component
 import NoteDialog from "@/components/note-dialog"
+/**
+ * 
+ * @param children 子组件
+ */
 async function DashBoardLayout({ children }: { children: React.ReactNode }) {
   const session = await auth.api.getSession({
     headers: await headers(), // you need to pass the headers object.
@@ -28,7 +32,7 @@ async function DashBoardLayout({ children }: { children: React.ReactNode }) {
         <SidebarProvider>
           {/* 导航栏 */}
           <AppSidebar />
-          {/* Content */}
+          {/* 内容区域 */}
           <SidebarInset className="relative overflow-x-hidden pt-0">
             {/* 主要内容 */}
             <MainContent>{children}</MainContent>

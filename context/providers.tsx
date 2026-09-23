@@ -4,6 +4,7 @@ import React, { ReactNode } from "react"
 import QueryProvider from "./query-provider"
 import { Toaster } from "sonner"
 import { ThemeProvider } from "./theme-provider"
+import { TooltipProvider } from "@/components/ui/tooltip"
 
 interface Props {
   children: ReactNode
@@ -18,8 +19,10 @@ const Providers = ({ children }: Props) => {
         enableSystem
         disableTransitionOnChange
       >
-        {children}
-        <Toaster position="top-center" duration={3000} richColors />
+        <TooltipProvider>
+          {children}
+          <Toaster position="top-center" duration={3000} richColors />
+        </TooltipProvider>
       </ThemeProvider>
     </QueryProvider>
   )

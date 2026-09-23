@@ -4,7 +4,8 @@ import type { AppType } from "@/app/api/[[...route]]/route"
 
 const NEXT_PUBLIC_APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? ""
 
-const fetchWithAuth: typeof fetch = (input, init) => {
+/** 为普通 API 和 AI 流式请求统一附加登录凭证。 */
+export const fetchWithAuth: typeof fetch = (input, init) => {
   const token = useAuthToken.getState().bearerToken
   const headers = new Headers(init?.headers)
 

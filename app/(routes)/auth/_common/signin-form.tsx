@@ -21,7 +21,6 @@ import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
@@ -30,7 +29,6 @@ import { useAuthToken } from "@/hooks/use-auth-token"
 // 登录表单的验证模式
 const signInSchema = z.object({
   email: z.email("请输入有效的邮箱地址"),
-
   password: z
     .string()
     .min(6, "密码长度必须大于6个字符")
@@ -39,7 +37,9 @@ const signInSchema = z.object({
 type SignInFormData = z.infer<typeof signInSchema>
 
 function SignInForm() {
+  // 路由实例
   const router = useRouter()
+  // 是否正在加载状态
   const [isLoading, setIsLoading] = useState(false)
   const signInForm = useForm<SignInFormData>({
     resolver: zodResolver(signInSchema),

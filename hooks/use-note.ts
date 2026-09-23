@@ -52,6 +52,7 @@ export const useNotes = (page: number = 1, limit: number = 20) => {
   return useQuery({
     queryKey: ["notes", page, limit],
     queryFn: async () => {
+      // 请求笔记列表
       const res = await api.note.all.$get({
         query: { page, limit },
       })

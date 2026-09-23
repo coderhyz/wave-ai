@@ -1,113 +1,340 @@
 generator client {
+  /**
+   * 生成 Prisma Client，并输出到项目内的自定义目录。
+   */
   provider = "prisma-client-js"
   output   = "../app/generated/prisma"
 }
 
 datasource db {
+  /**
+   * 项目使用 PostgreSQL，连接地址从 .env 的 DATABASE_URL 读取。
+   */
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
+/**
+ * 用户主表，由 Better Auth 和项目业务共同使用。
+ */
 model User {
+  /**
+   * Better Auth 生成的用户唯一标识。
+   */
   id            String    @id
-  name          String //用户姓名
-  email         String //用户邮箱
+  /**
+   * 用户显示名称。
+   */
+  name          String
+  /**
+   * 登录邮箱，同一邮箱只能注册一次。
+   */
+  email         String
+  /**
+   * 邮箱是否已经完成验证。
+   */
   emailVerified Boolean   @default(false)
+  /**
+   * 用户头像地址。
+   */
   image         String?
+  /**
+   * 用户注册时间。
+   */
   createdAt     DateTime  @default(now())
+  /**
+   * 用户资料最后更新时间。
+   */
   updatedAt     DateTime  @updatedAt
+  /**
+   * 当前用户创建的登录会话。
+   */
   sessions      Session[]
+  /**
+   * 当前用户绑定的登录方式或第三方账号。
+   */
   accounts      Account[]
+  /**
+   * 当前用户创建的笔记。
+   */
   notes         Note[]
+  /**
+   * 当前用户创建的 AI 会话。
+   */
   chats         Chat[]
 
+  /**
+   * 保证邮箱唯一。
+   */
   @@unique([email])
+  /**
+   * 映射到数据库中 Better Auth 使用的 user 表。
+   */
   @@map("user")
 }
 
+/**
+ * 登录会话表，用于保存 Better Auth 的登录状态。
+ */
 model Session {
+  /**
+   * 登录会话唯一标识。
+   */
   id        String   @id
+  /**
+   * 会话过期时间。
+   */
   expiresAt DateTime
+  /**
+   * 浏览器或客户端持有的唯一会话令牌。
+   */
   token     String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  /**
+   * 发起登录请求的 IP 地址。
+   */
   ipAddress String?
+  /**
+   * 发起登录请求的浏览器或客户端信息。
+   */
   userAgent String?
+  /**
+   * 会话所属用户的 ID。
+   */
   userId    String
+  /**
+   * 会话所属用户；删除用户时级联删除会话。
+   */
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  /**
+   * 每个会话令牌只能对应一条登录会话。
+   */
   @@unique([token])
+  /**
+   * 加速查询某个用户的所有登录会话。
+   */
   @@index([userId])
   @@map("session")
 }
 
+/**
+ * 登录账号表，用于保存密码账号或第三方 OAuth 账号信息。
+ */
 model Account {
+  /**
+   * 账号记录唯一标识。
+   */
   id                    String    @id
+  /**
+   * 登录提供方内部的账号 ID。
+   */
   accountId             String
+  /**
+   * 登录提供方标识，例如 credential 或第三方平台名称。
+   */
   providerId            String
+  /**
+   * 账号所属用户的 ID。
+   */
   userId                String
+  /**
+   * 账号所属用户；删除用户时级联删除账号。
+   */
   user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /**
+   * 第三方登录访问令牌。
+   */
   accessToken           String?
+  /**
+   * 第三方登录刷新令牌。
+   */
   refreshToken          String?
+  /**
+   * OpenID Connect 身份令牌。
+   */
   idToken               String?
   accessTokenExpiresAt  DateTime?
   refreshTokenExpiresAt DateTime?
+  /**
+   * 第三方登录授权范围。
+   */
   scope                 String?
+  /**
+   * credential 登录方式保存的密码摘要。
+   */
   password              String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
+  /**
+   * 加速查询某个用户绑定的账号。
+   */
   @@index([userId])
   @@map("account")
 }
 
+/**
+ * 用户笔记表。
+ */
 model Note {
+  /**
+   * 笔记唯一标识，由 Prisma 生成 UUID。
+   */
   id        String   @id @default(uuid())
-  title     String //笔记标题
-  content   String //笔记内容
+  /**
+   * 笔记标题。
+   */
+  title     String
+  /**
+   * 笔记正文。
+   */
+  content   String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  /**
+   * 笔记所属用户的 ID。
+   */
   userId    String
+  /**
+   * 笔记所属用户；删除用户时级联删除笔记。
+   */
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  /**
+   * 加速查询某个用户的笔记列表。
+   */
   @@index([userId])
   @@map("notes")
 }
 
+/**
+ * AI 会话表，一条记录表示用户的一段完整对话。
+ */
 model Chat {
+  /**
+   * 会话唯一标识；前端也可以提前生成 UUID 并随首条消息提交。
+   */
   id        String    @id @default(uuid())
+  /**
+   * 会话标题；新会话默认使用占位标题，后续可以改名。
+   */
   title     String    @default("新对话")
+  /**
+   * 本会话最近一次使用的模型 ID。
+   */
   modelId   String?
+  /**
+   * 会话是否固定在历史列表顶部。
+   */
+  isPinned  Boolean   @default(false)
+  /**
+   * 最近一次置顶时间，用于多个置顶会话之间排序。
+   */
+  pinnedAt  DateTime?
+  /**
+   * 会话创建时间。
+   */
   createdAt DateTime  @default(now())
+  /**
+   * 会话最后更新时间，用于历史列表排序。
+   */
   updatedAt DateTime  @updatedAt
+  /**
+   * 会话所属用户的 ID。
+   */
   userId    String
+  /**
+   * 会话所属用户；删除用户时级联删除会话。
+   */
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /**
+   * 会话包含的全部消息。
+   */
   messages  Message[]
 
-  @@index([userId, updatedAt(sort: Desc)])
+  /**
+   * 支持按用户查询会话，并依次按置顶状态、置顶时间和更新时间排序。
+   */
+  @@index([userId, isPinned(sort: Desc), pinnedAt(sort: Desc), updatedAt(sort: Desc)])
   @@map("chats")
 }
 
+/**
+ * 消息角色，与 AI SDK 的 UIMessage 角色保持一致。
+ */
 enum Role {
+  /**
+   * 用户输入。
+   */
   user
+  /**
+   * AI 模型回复。
+   */
   assistant
+  /**
+   * 系统消息；业务系统提示词通常仍由服务端直接注入。
+   */
   system
 }
 
+/**
+ * 聊天消息表，保存用户输入和模型回复。
+ */
 model Message {
+  /**
+   * 消息唯一标识，由客户端或流式响应服务端生成，用于请求幂等。
+   */
   id               String   @id
+  /**
+   * 消息发送方角色。
+   */
   role             Role
+  /**
+   * AI SDK UIMessage.parts 的完整 JSON 数据，可保存文本、推理、来源和工具结果。
+   */
   parts            Json
+  /**
+   * 不适合独立建列的扩展信息，例如生成是否被用户中止。
+   */
   metadata         Json?
+  /**
+   * 生成这条助手消息时使用的模型 ID；用户消息通常为空。
+   */
   modelId          String?
+  /**
+   * 模型结束生成的原因，例如 stop、length 或 error。
+   */
   finishReason     String?
+  /**
+   * 本次模型调用消耗的输入 token 数。
+   */
   promptTokens     Int?
+  /**
+   * 本次模型调用生成的输出 token 数。
+   */
   completionTokens Int?
+  /**
+   * 消息创建时间。
+   */
   createdAt        DateTime @default(now())
+  /**
+   * 消息最后更新时间。
+   */
   updatedAt        DateTime @updatedAt
+  /**
+   * 消息所属会话的 ID。
+   */
   chatId           String
+  /**
+   * 消息所属会话；删除会话时级联删除全部消息。
+   */
   chat             Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
+  /**
+   * 支持按会话和创建时间正序读取完整上下文。
+   */
   @@index([chatId, createdAt])
   @@map("messages")
 }

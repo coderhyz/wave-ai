@@ -17,6 +17,7 @@ import useNoteId from "@/hooks/use-note-id"
 
 function NavNotesContent() {
   const { data, isLoading, isError } = useNotes()
+  // 获取当前选中的笔记ID和设置笔记ID的函数
   const { setNoteId, noteId } = useNoteId()
   const { mutate, isPending } = useCreateNote()
   const notes = data?.notes ?? []

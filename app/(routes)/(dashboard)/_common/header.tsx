@@ -43,27 +43,7 @@ function Header({ title, showActions = true }: HeaderProps) {
             open && "! w-full max-w-full! lg:p-[0_0_0_250px]"
           )}
         >
-          <h2>{title}</h2>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="cursor-pointer bg-muted/10!"
-              onClick={onClick}
-            >
-              <RiAddLine className="h-8 w-8" />
-              New Chat
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="! cursor-pointer bg-muted/10"
-              // onClick={onToggleHistory}
-            >
-              <RiHistoryLine className="h-8 w-8" />
-              Chat history
-            </Button>
-          </div>
+          <h2 className="text-xl font-semibold lg:text-2xl">{title}</h2>
         </div>
       )}
     </header>

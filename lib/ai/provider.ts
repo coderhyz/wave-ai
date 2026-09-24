@@ -6,11 +6,11 @@ import { DEVELOPMENT_CHAT_MODEL } from "./model"
 const qwen = createAlibaba({
   apiKey: process.env.QWEN_API_KEY,
 })
-
+// 模型提供商
 export const myProvider = customProvider({
   languageModels: {
     [DEVELOPMENT_CHAT_MODEL]: deepseek.languageModel(DEVELOPMENT_CHAT_MODEL),
     "qwen-plus": qwen.languageModel("qwen-plus"),
-    "title-model": deepseek.languageModel("deepseek-chat"),
+    "title-model": deepseek.languageModel("deepseek-v4-pro"),
   },
 })

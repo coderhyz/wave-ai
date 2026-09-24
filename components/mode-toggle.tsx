@@ -12,7 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-export default function ModeToggle() {
+export default function ModeToggle({ className }: { className?: string }) {
   // 使用 useTheme 钩子来获取 setTheme 函数，以便在用户选择主题时调用它来切换主题
   const { setTheme } = useTheme()
 
@@ -20,16 +20,21 @@ export default function ModeToggle() {
     <DropdownMenu>
       {/* 触发器 */}
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="icon">
+        <Button
+          aria-label="切换主题"
+          className={className}
+          size="icon"
+          variant="outline"
+        >
           <Sun className="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 transition-all dark:scale-0 dark:-rotate-90" />
           <Moon className="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 transition-all dark:scale-100 dark:rotate-0" />
-          <span className="sr-only">Toggle theme</span>
+          <span className="sr-only">切换主题</span>
         </Button>
       </DropdownMenuTrigger>
       {/* 下拉菜单内容 */}
       <DropdownMenuContent
-        align="start"
-        side="right"
+        align="end"
+        side="bottom"
         sideOffset={8}
         className="min-w-40 rounded-lg"
       >

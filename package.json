@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "npx prisma migrate dev --name init",
     "db:studio": "npx prisma studio",
-    "postinstall": "prisma generate --no-engine"
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@ai-sdk/alibaba": "^2.0.54",

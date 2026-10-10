@@ -23,36 +23,37 @@
 - `components/ai-elements/prompt-input.tsx`：附件和引用来源相关的底层组件能力。
 - `components/ai-elements/message.tsx`：Streamdown Markdown、代码、数学公式和 Mermaid 渲染。
 
-当前依赖为 AI SDK 5：
+当前依赖已经升级到 AI SDK 7：
 
 ```text
-ai@5.0.23
-@ai-sdk/react@2.0.23
-@ai-sdk/deepseek@1.0.58
-@ai-sdk/alibaba@0.0.30
+ai@7.0.113
+@ai-sdk/react@4.0.116
+@ai-sdk/deepseek@3.0.52
+@ai-sdk/alibaba@2.0.54
+@ai-sdk/gateway@4.0.91
 ```
 
-AI SDK 5 已提供 `Experimental_Agent`、`streamText`、`tools`、`stopWhen`、`prepareStep` 和 `onStepFinish`。当前官方版本使用稳定的 `ToolLoopAgent`，因此建议在正式开发 Agent Harness 前，用独立提交升级 AI SDK 6，并先回归现有聊天功能。
+AI SDK 7 已提供稳定的 `ToolLoopAgent`、`streamText`、`tools`、`stopWhen`、`prepareStep` 和 `onStepEnd`。普通聊天接口已完成 v7 流式消息迁移，后续可以在此基线上开发 Agent Harness。
 
 参考资料：
 
-- [AI SDK 5 升级到 6](https://ai-sdk.dev/docs/migration-guides/migration-guide-6-0)
+- [AI SDK 7 迁移指南](https://ai-sdk.dev/docs/migration-guides/migration-guide-7-0)
 - [AI SDK Agent 概览](https://ai-sdk.dev/docs/agents/overview)
 - [AI SDK ToolLoopAgent](https://ai-sdk.dev/docs/reference/ai-sdk-core/tool-loop-agent)
 
-如果暂时不升级，可以先使用当前版本的 `streamText` 完成最小工具循环：
+使用当前 AI SDK 7 的 `streamText` 可以完成最小工具循环：
 
 ```ts
 streamText({
   model,
   tools,
-  stopWhen: stepCountIs(8),
+  stopWhen: isStepCount(8),
   prepareStep,
-  onStepFinish,
+  onStepEnd,
 })
 ```
 
-不建议围绕 `Experimental_Agent` 编写过多业务封装，因为升级 AI SDK 6 后仍需迁移为 `ToolLoopAgent`。
+新的 Agent 能力直接围绕稳定的 `ToolLoopAgent` 设计，不再引入 `Experimental_Agent` 兼容层。
 
 ## 3. 总体架构
 
@@ -1168,10 +1169,10 @@ interface AgentEvalCase {
 
 ### 阶段 0：依赖和模型能力验证
 
-1. 使用独立提交升级 AI SDK 6。
-2. 修复迁移涉及的 `convertToModelMessages`、工具 part Helper 等变化。
-3. 回归发送、停止、重新生成、历史恢复和消息持久化。
-4. 分别验证 Qwen 和 DeepSeek 的单次工具调用、多步调用与流式工具 part。
+1. 确认部署、CI 和本地环境均使用 Node.js 22 或更高版本。
+2. 回归 AI SDK 7 下的发送、停止、重新生成、历史恢复和消息持久化。
+3. 分别验证 Qwen 和 DeepSeek 的单次工具调用、多步调用与流式工具 part。
+4. 记录 Provider 在 reasoning、source 和 tool parts 上的差异。
 
 ### 阶段 1：最小联网 Agent
 

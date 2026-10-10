@@ -4,7 +4,7 @@ import type { ProviderOptions } from "@ai-sdk/provider-utils"
 import { customProvider } from "ai"
 import { chatModels, DEVELOPMENT_CHAT_MODEL, type ChatModelId } from "./model"
 import { getModelGenerationSettings } from "./generation-settings"
-
+// 千问模型创建
 const qwen = createAlibaba({
   apiKey: process.env.QWEN_API_KEY,
   baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",

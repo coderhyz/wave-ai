@@ -1,8 +1,9 @@
 import type { UIMessage } from "ai"
-import { HTTPException } from "hono/http-exception"
 import { fromBufferPromise } from "yauzl"
 import mammoth from "mammoth"
+import { HTTPException } from "hono/http-exception"
 
+/** 原始附件、解压内容、页数和最终模型文本分别设置上限，避免资源耗尽。 */
 export const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
 export const MAX_DOCUMENT_TEXT_LENGTH = 100_000
 const MAX_PDF_PAGES = 50
@@ -13,6 +14,7 @@ const DOCX_MEDIA_TYPE =
 
 type AttachmentInfo = { mediaType: string; filename?: string }
 
+/** MIME 不可靠时使用文件扩展名兜底，只把 PDF 和 DOCX 当作可解析文档。 */
 export function getDocumentKind(file: AttachmentInfo): "pdf" | "docx" | null {
   const mediaType = file.mediaType.toLowerCase().split(";")[0].trim()
   if (mediaType === "application/pdf" || /\.pdf$/i.test(file.filename ?? ""))
@@ -24,6 +26,7 @@ export function getDocumentKind(file: AttachmentInfo): "pdf" | "docx" | null {
 
 /** 仅接收浏览器上传的字节，不在服务端抓取用户指定的 URL。 */
 export function decodeAttachmentDataUrl(url: string): Buffer {
+  // 拒绝 http/file 等地址，避免服务端替用户访问内网或本地文件。
   if (!url.startsWith("data:"))
     throw new HTTPException(400, { message: "文件附件必须使用 data URL" })
   if (url.length > MAX_ATTACHMENT_BYTES * 3 + 256)
@@ -35,6 +38,7 @@ export function decodeAttachmentDataUrl(url: string): Buffer {
   const encoded = url.slice(separator + 1)
   let content: Buffer
   try {
+    // Data URL 既可能使用 base64，也可能使用百分号编码的 UTF-8 文本。
     if (/;base64$/i.test(metadata)) {
       if (
         !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
@@ -49,6 +53,7 @@ export function decodeAttachmentDataUrl(url: string): Buffer {
   } catch {
     throw new HTTPException(400, { message: "无法读取附件内容" })
   }
+  // URL 字符长度只能快速拦截，解码后还要按真实字节数再次检查。
   if (content.byteLength > MAX_ATTACHMENT_BYTES)
     throw new HTTPException(413, { message: "单个附件不能超过 2 MB" })
   return content
@@ -61,11 +66,13 @@ async function validateDocxArchive(buffer: Buffer) {
   let declaredBytes = 0
   let actualBytes = 0
   try {
+    // 同时限制条目数量、单条大小、声明总大小和实际读取总大小。
     if (zip.entryCount > 500)
       throw new HTTPException(413, {
         message: "DOCX 结构过于复杂，请拆分后上传",
       })
     for await (const entry of zip.eachEntry()) {
+      // 重复路径可能使不同 ZIP 解析器读取到不一致内容，因此直接拒绝。
       if (names.has(entry.fileName))
         throw new HTTPException(400, {
           message: "DOCX 包含重复文件，无法安全解析",
@@ -82,6 +89,7 @@ async function validateDocxArchive(buffer: Buffer) {
       if (entry.fileName.endsWith("/")) continue
       const stream = await zip.openReadStreamPromise(entry)
       try {
+        // 不完全信任 ZIP 头声明，实际解压读取时继续累计字节数。
         for await (const chunk of stream) {
           actualBytes += chunk.length
           if (actualBytes > MAX_DOCX_EXPANDED_BYTES)
@@ -93,6 +101,7 @@ async function validateDocxArchive(buffer: Buffer) {
         stream.destroy()
       }
     }
+    // 这两个文件是最小 DOCX 结构，缺少时通常只是改了扩展名的 ZIP。
     if (!names.has("[Content_Types].xml") || !names.has("word/document.xml"))
       throw new HTTPException(400, { message: "文件不是有效的 DOCX 文档" })
   } finally {
@@ -100,6 +109,7 @@ async function validateDocxArchive(buffer: Buffer) {
   }
 }
 
+/** 逐页提取 PDF 文字，并在读取过程中持续检查页数和字符数限制。 */
 async function extractPdfText(buffer: Buffer) {
   if (!buffer.subarray(0, 1024).includes(Buffer.from("%PDF-")))
     throw new HTTPException(400, { message: "文件不是有效的 PDF 文档" })
@@ -148,10 +158,12 @@ export async function extractDocumentText(
     if (kind === "pdf") {
       text = await extractPdfText(buffer)
     } else {
+      // 先验证 ZIP 结构和解压上限，再交给 Mammoth 提取纯文本。
       await validateDocxArchive(buffer)
       // 只传 Buffer，不提供文件路径；Mammoth 默认禁用外部文件访问。
       text = (await mammoth.extractRawText({ buffer })).value
     }
+    // 清理二进制文档中偶尔出现的空字符，避免污染模型上下文。
     text = text.replace(/\u0000/g, "").trim()
     if (!text)
       throw new HTTPException(400, {
@@ -166,6 +178,7 @@ export async function extractDocumentText(
       })
     return text
   } catch (error) {
+    // 已分类的业务错误保持具体状态码和文案。
     if (error instanceof HTTPException) throw error
     if (error instanceof Error && error.name === "PasswordException")
       throw new HTTPException(400, { message: "PDF 已加密，请移除密码后上传" })
@@ -180,10 +193,12 @@ export async function extractDocumentText(
  * 图片保留 file part，其他附件转换为文本；数据库仍保留原文件用于预览。
  */
 export function createAttachmentPreparer() {
+  // 缓存只存在于当前请求：同一附件“写库前校验”和“生成前转换”只解析一次。
   const cache = new Map<string, Promise<string>>()
   return async (messages: UIMessage[]): Promise<UIMessage[]> => {
     const prepared: UIMessage[] = []
     for (const message of messages) {
+      // 限制的是单条消息附件数，历史中的不同消息可以各自包含附件。
       if (message.parts.filter((part) => part.type === "file").length > 3)
         throw new HTTPException(400, { message: "一条消息最多包含 3 个附件" })
       const parts: UIMessage["parts"] = []
@@ -197,6 +212,7 @@ export function createAttachmentPreparer() {
             part.mediaType
           )
         ) {
+          // 视觉模型可以直接读取图片，所以保留原 file part。
           if (
             part.url.startsWith("data:") &&
             part.url.length > MAX_ATTACHMENT_BYTES * 1.5
@@ -206,6 +222,7 @@ export function createAttachmentPreparer() {
           continue
         }
         const kind = getDocumentKind(part)
+        // 非文档附件只允许明确的文本格式，二进制格式不能直接塞进提示词。
         if (
           !kind &&
           !(
@@ -228,6 +245,7 @@ export function createAttachmentPreparer() {
         }
         const content = await pending
         const filename = part.filename ?? "未命名附件"
+        // 用清晰边界包住附件文字，降低模型把附件和用户正文混淆的概率。
         parts.push({
           type: "text",
           text:
@@ -240,6 +258,7 @@ export function createAttachmentPreparer() {
             "」内容结束 ---",
         })
       }
+      // 创建新消息对象，数据库里保存的原始 file part 不会被原地修改。
       prepared.push({ ...message, parts })
     }
     return prepared

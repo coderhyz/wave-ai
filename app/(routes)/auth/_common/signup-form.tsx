@@ -56,6 +56,7 @@ function SignupForm() {
   })
   async function onSubmit(data: SignUpFormData) {
     try {
+      // 注册
       await authClient.signUp.email(
         {
           name: data.name,

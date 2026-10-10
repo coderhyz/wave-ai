@@ -37,6 +37,9 @@ next-env.d.ts
 
 /generated/prisma
 
+# docs不提交
+/docs
+
 /app/generated/prisma
 
 /app/generated/prisma

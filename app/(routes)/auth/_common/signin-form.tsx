@@ -35,7 +35,7 @@ const signInSchema = z.object({
     .regex(/[A-Z]/, "密码必须包含大写字母"),
 })
 type SignInFormData = z.infer<typeof signInSchema>
-
+// 注册表单
 function SignInForm() {
   // 路由实例
   const router = useRouter()
@@ -64,6 +64,7 @@ function SignInForm() {
           },
           onSuccess: (ctx) => {
             const authToken = ctx.response.headers.get("set-auth-token")
+            // 将获取到的 authToken 存储在全局状态中，以便后续请求使用
             useAuthToken.getState().setBearerToken(authToken)
             // 登录成功后，重定向到 /home 页面
             router.push("/home")
@@ -108,7 +109,7 @@ function SignInForm() {
                   <FormItem>
                     <FormLabel>邮箱</FormLabel>
                     <FormControl>
-                      <Input placeholder="请输入邮箱" {...field} />
+                      <Input placeholder="请输入邮箱" type="email" {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

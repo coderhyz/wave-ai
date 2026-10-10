@@ -23,5 +23,5 @@ export const fetchWithAuth: typeof fetch = (input, init) => {
 export const client = hc<AppType>(NEXT_PUBLIC_APP_URL, {
   fetch: fetchWithAuth,
 })
-
+// 通过 hc 创建的 client 可以直接调用 API 方法，返回 Promise 对象
 export const api = client.api

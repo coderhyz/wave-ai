@@ -21,47 +21,51 @@ model User {
   /**
    * Better Auth 生成的用户唯一标识。
    */
-  id            String    @id
+  id             String          @id
   /**
    * 用户显示名称。
    */
-  name          String
+  name           String
   /**
    * 登录邮箱，同一邮箱只能注册一次。
    */
-  email         String
+  email          String
   /**
    * 邮箱是否已经完成验证。
    */
-  emailVerified Boolean   @default(false)
+  emailVerified  Boolean         @default(false)
   /**
    * 用户头像地址。
    */
-  image         String?
+  image          String?
   /**
    * 用户注册时间。
    */
-  createdAt     DateTime  @default(now())
+  createdAt      DateTime        @default(now())
   /**
    * 用户资料最后更新时间。
    */
-  updatedAt     DateTime  @updatedAt
+  updatedAt      DateTime        @updatedAt
   /**
    * 当前用户创建的登录会话。
    */
-  sessions      Session[]
+  sessions       Session[]
   /**
    * 当前用户绑定的登录方式或第三方账号。
    */
-  accounts      Account[]
+  accounts       Account[]
   /**
    * 当前用户创建的笔记。
    */
-  notes         Note[]
+  notes          Note[]
+  /**
+   * 用户拥有的私有文档知识库。
+   */
+  knowledgeBases KnowledgeBase[]
   /**
    * 当前用户创建的 AI 会话。
    */
-  chats         Chat[]
+  chats          Chat[]
 
   /**
    * 保证邮箱唯一。
@@ -337,4 +341,191 @@ model Message {
    */
   @@index([chatId, createdAt])
   @@map("messages")
+}
+
+/**
+ * 知识库是所有权根节点；正常删除使用 deletedAt，再清理存储文件。
+ */
+model KnowledgeBase {
+  id          String                  @id @default(uuid())
+  userId      String
+  user        User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+  deletedAt   DateTime?
+  folders     KnowledgeFolder[]
+  documents   KnowledgeDocument[]
+  jobs        DocumentProcessingJob[]
+
+  @@index([userId, deletedAt])
+  @@map("knowledge_bases")
+}
+
+/**
+ * 多级目录；parentId 为空代表根目录，同库和无环规则由后续业务事务校验。
+ */
+model KnowledgeFolder {
+  id              String              @id @default(uuid())
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase       @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  parentId        String?
+  parent          KnowledgeFolder?    @relation("KnowledgeFolderTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children        KnowledgeFolder[]   @relation("KnowledgeFolderTree")
+  name            String
+  sortOrder       Int                 @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  deletedAt       DateTime?
+  documents       KnowledgeDocument[]
+
+  @@index([knowledgeBaseId, parentId, deletedAt, sortOrder])
+  @@map("knowledge_folders")
+}
+
+enum KnowledgeDocumentType {
+  PDF
+  DOCX
+  MARKDOWN
+  TEXT
+}
+
+enum KnowledgeDocumentSource {
+  UPLOAD
+  MANUAL
+}
+
+enum KnowledgeDocumentStatus {
+  QUEUED
+  PARSING
+  READY
+  FAILED
+}
+
+enum DocumentChunkStatus {
+  PENDING
+  RUNNING
+  READY
+  FAILED
+}
+
+/**
+ * 新文档独立于旧 Note，原文件与可编辑的解析副本分别保存。
+ */
+model KnowledgeDocument {
+  id                     String                  @id @default(uuid())
+  knowledgeBaseId        String
+  knowledgeBase          KnowledgeBase           @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  folderId               String?
+  folder                 KnowledgeFolder?        @relation(fields: [folderId], references: [id], onDelete: NoAction)
+  title                  String
+  type                   KnowledgeDocumentType
+  source                 KnowledgeDocumentSource
+  status                 KnowledgeDocumentStatus @default(QUEUED)
+  /**
+   * 手动创建的文档没有原文件；下载原件使用 storageKey。
+   */
+  originalFileName       String?
+  mimeType               String?
+  sizeBytes              Int?
+  checksumSha256         String?
+  storageKey             String?
+  /**
+   * 待解析时可为空；就绪后保存合法的 Tiptap JSON，plainText 由服务端派生。
+   */
+  contentJson            Json?
+  plainText              String                  @default("")
+  /**
+   * revision 跟踪所有可见更新，contentRevision 只跟踪正文更新。
+   */
+  revision               Int                     @default(0)
+  contentRevision        Int                     @default(0)
+  parserVersion          String?
+  parseMetadata          Json?
+  parseErrorCode         String?
+  parseErrorMessage      String?
+  parsedAt               DateTime?
+  /**
+   * 分块状态独立于正文状态；失败时仍可阅读和编辑正文。
+   */
+  chunkedContentRevision Int?
+  chunkStatus            DocumentChunkStatus     @default(PENDING)
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  deletedAt              DateTime?
+  chunks                 DocumentChunk[]
+  jobs                   DocumentProcessingJob[]
+
+  @@index([knowledgeBaseId, folderId, deletedAt, status])
+  @@index([knowledgeBaseId, deletedAt, updatedAt(sort: Desc)])
+  @@map("knowledge_documents")
+}
+
+/**
+ * 同一正文版本中的文本块；唯一约束避免任务重试产生重复分块。
+ */
+model DocumentChunk {
+  id              String            @id @default(uuid())
+  documentId      String
+  document        KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  contentRevision Int
+  chunkIndex      Int
+  content         String
+  checksum        String
+  metadata        Json?
+  charCount       Int
+  createdAt       DateTime          @default(now())
+
+  @@unique([documentId, contentRevision, chunkIndex])
+  @@map("document_chunks")
+}
+
+enum DocumentProcessingJobType {
+  PARSE
+  REPARSE
+  RECHUNK
+  CLEANUP
+}
+
+enum DocumentProcessingJobStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/**
+ * 持久化任务记录；后续 Worker 通过锁令牌和租约防止重复提交。
+ */
+model DocumentProcessingJob {
+  id              String                      @id @default(uuid())
+  knowledgeBaseId String?
+  knowledgeBase   KnowledgeBase?              @relation(fields: [knowledgeBaseId], references: [id], onDelete: SetNull)
+  documentId      String?
+  document        KnowledgeDocument?          @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  type            DocumentProcessingJobType
+  status          DocumentProcessingJobStatus @default(PENDING)
+  dedupeKey       String                      @unique
+  targetRevision  Int?
+  /**
+   * CLEANUP 必须独立保存 storageKey；关联行删除后任务仍然存在。
+   */
+  payload         Json
+  attempts        Int                         @default(0)
+  maxAttempts     Int                         @default(3)
+  availableAt     DateTime                    @default(now())
+  lockedAt        DateTime?
+  lockedUntil     DateTime?
+  lockToken       String?
+  lastError       String?
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+
+  @@index([status, availableAt])
+  @@index([status, lockedUntil])
+  @@index([knowledgeBaseId, status])
+  @@index([documentId, status])
+  @@map("document_processing_jobs")
 }

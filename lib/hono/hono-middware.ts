@@ -17,21 +17,14 @@ type Env = {
 }
 // 验证用户身份的中间件
 export const getAuthUser = createMiddleware<Env>(async (c, next) => {
-  try {
-    const session = await auth.api.getSession({
-      headers: c.req.raw.headers,
-    })
-    if (!session) {
-      throw new HTTPException(401, { message: "未认证" })
-    }
-    // 如果 session 存在，将用户信息存储在上下文中，以便后续处理使用
-    c.set("user", session.user)
-    await next()
-  } catch (error) {
-    console.log(error)
-    if (error instanceof HTTPException) {
-      throw error
-    }
+  const session = await auth.api.getSession({
+    headers: c.req.raw.headers,
+  })
+  if (!session) {
     throw new HTTPException(401, { message: "未认证" })
   }
+
+  // 认证服务故障和下游业务异常交给全局错误处理，避免误报为未登录。
+  c.set("user", session.user)
+  await next()
 })

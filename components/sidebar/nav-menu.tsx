@@ -1,12 +1,11 @@
 import React from "react"
-import { RemixiconComponentType } from "@remixicon/react"
 import { usePathname, useRouter } from "next/navigation"
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar"
 
 type Menu = {
   title: string
   url: string
-  icon: RemixiconComponentType
+  icon: React.ElementType
 }
 function NavMenu({ menus }: { menus: Menu[] }) {
   const router = useRouter()
@@ -24,16 +23,19 @@ function NavMenu({ menus }: { menus: Menu[] }) {
               className="relative flex flex-col items-stretch"
             >
               <SidebarMenuButton
-                className="group/menu-button h-9 cursor-pointer rounded-md bg-linear-to-r font-medium hover:bg-transparent hover:from-sidebar-accent hover:to-sidebar-accent/40 data-[active=true]:from-primary/20 data-[active=true]:to-primary/5 [&>svg]:size-auto"
+                className="group/menu-button h-9 cursor-pointer rounded-md bg-linear-to-r font-medium hover:bg-transparent hover:from-sidebar-accent hover:to-sidebar-accent/40 data-[active=true]:from-primary/20 data-[active=true]:to-primary/5 group-data-[collapsible=icon]:size-10! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:data-[active=true]:bg-primary group-data-[collapsible=icon]:data-[active=true]:text-primary-foreground [&>svg]:size-auto"
                 // 选中状态
                 isActive={isActive}
+                tooltip={menu.title}
                 onClick={() => router.push(menu.url)}
               >
                 <menu.icon
-                  className="text-muted-foreground/60 group-data-[active=true]/menu-button:text-primary"
+                  className="text-muted-foreground/70 group-data-[active=true]/menu-button:text-primary group-data-[collapsible=icon]:group-data-[active=true]/menu-button:text-primary-foreground"
                   size={22}
                 />
-                <span>{menu.title}</span>
+                <span className="group-data-[collapsible=icon]:hidden">
+                  {menu.title}
+                </span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           )

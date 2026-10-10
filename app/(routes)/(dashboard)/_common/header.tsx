@@ -16,7 +16,11 @@ function Header({ title, showActions = true }: HeaderProps) {
   const { open, isMobile } = useSidebar()
   return (
     <header className="fixed inset-0 top-0 z-9 flex h-13 items-center bg-background/20 px-2 py-1 backdrop-blur-sm">
-      {(!open || isMobile) && <SidebarTrigger className="h-10" />}
+      {(!open || isMobile) && (
+        <SidebarTrigger
+          className={cn("h-10", !isMobile && "ml-(--sidebar-width-icon)")}
+        />
+      )}
       {!showActions && title && (
         <div
           className={cn(

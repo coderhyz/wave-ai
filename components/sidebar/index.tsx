@@ -1,5 +1,5 @@
 "use client"
-import { RiScanLine, RiChatAiLine, RiSettings3Line } from "@remixicon/react"
+import { RiChatAiLine, RiSettings3Line } from "@remixicon/react"
 import {
   Sidebar,
   SidebarContent,
@@ -16,8 +16,7 @@ import { toast } from "sonner"
 import NavMenu from "@/components/sidebar/nav-menu"
 import NavUser from "@/components/sidebar/nav-user"
 import NavChats from "@/components/sidebar/nav-chats"
-// import ModeToggle from "@/components/mode-toggle";
-// import NoteDialog from "@/components/note-dialog";
+import { BookText } from "lucide-react"
 // 菜单项
 const navMenu = [
   {
@@ -28,7 +27,7 @@ const navMenu = [
   {
     title: "知识库",
     url: "/home",
-    icon: RiScanLine,
+    icon: BookText,
   },
 
   {
@@ -37,7 +36,11 @@ const navMenu = [
     icon: RiSettings3Line,
   },
 ]
-function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+// 侧边栏组件
+function AppSidebar({
+  collapsible = "icon",
+  ...props
+}: React.ComponentProps<typeof Sidebar>) {
   const router = useRouter()
   // 清除认证令牌的函数
   const { clearBearerToken } = useAuthToken()
@@ -77,12 +80,12 @@ function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <>
       {/* <NoteDialog /> */}
-      <Sidebar className="z-99" {...props}>
+      <Sidebar collapsible={collapsible} className="z-99" {...props}>
         {/* 导航栏头部 */}
         <SidebarHeader>
           <div className="flex w-full items-center justify-between">
             <Logo url="/home" />
-            <SidebarTrigger className="-ms-4" />
+            <SidebarTrigger className="-ms-4 group-data-[collapsible=icon]:hidden" />
           </div>
           {/* 分割线 */}
           <hr className="mx-2 -mt-px border-border" />

@@ -1,11 +1,9 @@
 "use client"
 
-import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { Plus } from "lucide-react"
+import { usePathname, useSearchParams } from "next/navigation"
 import { ChatSidebarItem } from "@/components/sidebar/chat-sidebar-item"
 import {
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarMenu,
@@ -16,34 +14,35 @@ import { useChatList } from "@/hooks/use-chat-list"
 
 /** 侧边栏中的 AI 历史会话列表。 */
 export default function NavChats() {
-  const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const activeChatId = searchParams.get("chatId")
+  // 请求历史会话列表
   const { data, isLoading, isError } = useChatList()
   const chats = data?.items ?? []
 
   return (
-    <SidebarGroup>
+    <SidebarGroup className="group-data-[collapsible=icon]:hidden">
       <SidebarGroup className="px-0">
         <SidebarGroupLabel className="text-sm font-semibold">
-          项目
+          对话
         </SidebarGroupLabel>
-        <SidebarGroupAction
+        {/* <SidebarGroupAction
           aria-label="新建 AI 对话"
           className="mt-0.5 size-6 cursor-pointer rounded-md border bg-primary/15 hover:bg-primary/25"
           onClick={() => router.push("/chat")}
         >
           <Plus className="size-4.5" />
-        </SidebarGroupAction>
+        </SidebarGroupAction> */}
       </SidebarGroup>
 
       <SidebarGroupContent className="h-auto max-h-[calc(100dvh-22rem)] min-h-32 w-full overflow-y-auto pr-0.5">
         <SidebarMenu className="gap-1.5">
           {isLoading ? (
-            Array.from({ length: 4 }).map((_, index) => (
+            Array.from({ length: 6 }).map((_, index) => (
               <SidebarMenuItem key={index}>
-                <SidebarMenuSkeleton className="h-12" showIcon />
+                {/* 骨架屏 */}
+                <SidebarMenuSkeleton className="h-14" showIcon />
               </SidebarMenuItem>
             ))
           ) : isError ? (

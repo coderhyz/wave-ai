@@ -1,10 +1,20 @@
 "use client"
-import React from "react"
+
+import dynamic from "next/dynamic"
 import useNoteId from "@/hooks/use-note-id"
-import { XIcon } from "lucide-react"
-import { Button } from "../ui/button"
+import { LoaderCircle } from "lucide-react"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet"
-import NoteView from "./note-view"
+
+/** 富文本编辑器体积较大，只在用户真正打开笔记时下载。 */
+const NoteView = dynamic(() => import("./note-view"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground">
+      <LoaderCircle className="size-4 animate-spin" />
+      正在加载笔记…
+    </div>
+  ),
+})
 
 function NoteDialog() {
   const { noteId, clearNoteId } = useNoteId()

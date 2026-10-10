@@ -76,7 +76,7 @@ export const ConversationScrollButton = ({
   ...props
 }: ConversationScrollButtonProps) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext()
-
+  // 移动到底部的回调函数
   const handleScrollToBottom = useCallback(() => {
     scrollToBottom()
   }, [scrollToBottom])

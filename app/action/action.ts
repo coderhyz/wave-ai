@@ -1,8 +1,7 @@
 "use server"
 import { myProvider } from "@/lib/ai/provider"
-import prisma from "@/lib/prisma"
+import { TITLE_GENERATION_SETTINGS } from "@/lib/ai/generation-settings"
 import { generateText, type UIMessage } from "ai"
-import { HTTPException } from "hono/http-exception"
 // 根据用户的消息生成标题
 export async function generateTitleForUserMessage({
   message,
@@ -12,7 +11,8 @@ export async function generateTitleForUserMessage({
   try {
     const { text } = await generateText({
       model: myProvider.languageModel("title-model"),
-      system: `\n
+      ...TITLE_GENERATION_SETTINGS,
+      instructions: `\n
                 - you will generate a short title based on the first message a user begins a conversation with
                 - ensure it is not more than 80 characters long
                 - the title should be a summary of the user's message

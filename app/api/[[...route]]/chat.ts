@@ -1,15 +1,20 @@
 import { zValidator } from "@hono/zod-validator"
 import { Hono } from "hono"
+import { bodyLimit } from "hono/body-limit"
+import { z } from "zod"
 import { HTTPException } from "hono/http-exception"
 import {
   consumeStream,
   convertToModelMessages,
+  createUIMessageStreamResponse,
   streamText,
+  toUIMessageStream,
   validateUIMessages,
   type UIMessage,
 } from "ai"
 import { getAuthUser } from "@/lib/hono/hono-middware"
-import { myProvider } from "@/lib/ai/provider"
+import { getChatGenerationSettings, myProvider } from "@/lib/ai/provider"
+import { resolveChatModelId } from "@/lib/ai/model"
 import { CHAT_SYSTEM_PROMPT } from "@/lib/ai/prompts"
 import {
   chatIdSchema,
@@ -18,6 +23,11 @@ import {
   updateChatSchema,
 } from "@/lib/chat/schemas"
 import { toUIMessage } from "@/lib/chat/mapper"
+import {
+  createAttachmentPreparer,
+  decodeAttachmentDataUrl,
+  extractDocumentText,
+} from "@/lib/chat/model-attachments"
 import {
   ChatOwnershipError,
   getOrCreateOwnedChat,
@@ -49,12 +59,41 @@ const throwApiError = (error: unknown, fallbackMessage: string): never => {
 /**
  * 聊天接口路由。它在 route.ts 中挂载到 `/api/chat`：
  * - POST   /api/chat      发送消息并以数据流返回模型回复
+ * - POST   /api/chat/attachments/preview  提取 PDF / DOCX 文字用于预览
  * - GET    /api/chat      分页获取当前用户的会话列表
  * - GET    /api/chat/:id  获取指定会话及全部消息
  * - PATCH  /api/chat/:id  修改标题或置顶状态
  * - DELETE /api/chat/:id  删除会话
  */
 export const chatRoute = new Hono()
+  /** PDF / DOCX 的文字预览与模型使用同一套解析器，并且必须登录。 */
+  .post(
+    "/attachments/preview",
+    getAuthUser,
+    bodyLimit({ maxSize: 3 * 1024 * 1024 }),
+    zValidator(
+      "json",
+      z
+        .object({
+          url: z.string().max(3 * 1024 * 1024),
+          mediaType: z.string().max(200),
+          filename: z.string().max(255).optional(),
+        })
+        .strict()
+    ),
+    async (c) => {
+      try {
+        const file = c.req.valid("json")
+        const text = await extractDocumentText(
+          decodeAttachmentDataUrl(file.url),
+          file
+        )
+        return c.json({ text, truncated: false })
+      } catch (error) {
+        return throwApiError(error, "附件预览失败")
+      }
+    }
+  )
   /**
    * 发送用户消息。
    * 执行顺序：验证登录态 -> 校验请求体 -> 保存用户消息 -> 调用模型 -> 返回流 -> 保存 AI 回复。
@@ -62,6 +101,7 @@ export const chatRoute = new Hono()
   .post(
     "/",
     getAuthUser,
+    bodyLimit({ maxSize: 10 * 1024 * 1024 }),
     zValidator("json", sendChatMessageSchema),
     async (c) => {
       try {
@@ -70,7 +110,7 @@ export const chatRoute = new Hono()
         const {
           id,
           message: rawMessage,
-          selectedModelId,
+          selectedModelId: requestedModelId,
           selectedToolName,
           trigger,
         } = c.req.valid("json")
@@ -87,6 +127,19 @@ export const chatRoute = new Hono()
           messages: [rawMessage],
         })
 
+        const hasImageInput = message.parts.some(
+          (part) => part.type === "file" && part.mediaType.startsWith("image/")
+        )
+        // DeepSeek 等纯文本模型无法看图；服务端再次兜底切换到视觉模型。
+        const selectedModelId = resolveChatModelId(
+          requestedModelId,
+          hasImageInput
+        )
+
+        // 在写库前校验附件，避免不支持或超限的内容成为无法继续处理的历史消息。
+        const prepareMessagesForModel = createAttachmentPreparer()
+        await prepareMessagesForModel([message])
+
         // 首条消息会创建会话；已有会话则检查它是否确实属于当前用户。
         await getOrCreateOwnedChat({
           id,
@@ -99,6 +152,7 @@ export const chatRoute = new Hono()
         const savedUserMessage = await saveMessageOnce({
           chatId: id,
           message,
+          modelId: selectedModelId,
           metadata: message.metadata,
         })
 
@@ -150,8 +204,13 @@ export const chatRoute = new Hono()
           // 根据已校验的模型 ID，从 Provider Registry 中选出实际语言模型。
           model: myProvider.languageModel(selectedModelId),
           // 系统提示词只由服务端注入，不允许客户端覆盖。
-          system: CHAT_SYSTEM_PROMPT,
-          messages: convertToModelMessages(uiMessages),
+          instructions: CHAT_SYSTEM_PROMPT,
+          // 模型需要完整上下文才能生成连贯回答，因此传入该会话的全部消息。
+          messages: await convertToModelMessages(
+            await prepareMessagesForModel(uiMessages)
+          ),
+          // 按实际模型设置思考预算与输出上限，客户端不能覆盖这些费用保护参数。
+          ...getChatGenerationSettings(selectedModelId),
           // 浏览器停止请求或断开连接时，把取消信号传给模型调用。
           abortSignal: c.req.raw.signal,
           maxRetries: 2,
@@ -161,9 +220,8 @@ export const chatRoute = new Hono()
         })
 
         // 转换成前端 useChat 可以直接解析的 UI Message Stream。
-        return result.toUIMessageStreamResponse({
-          // 即使浏览器取消读取响应，也继续消费服务端 SSE 流，让 abort 事件进入 onFinish。
-          consumeSseStream: consumeStream,
+        const uiMessageStream = toUIMessageStream({
+          stream: result.stream,
           // 原始上下文帮助 AI SDK 正确衔接本次新增的助手消息。
           originalMessages: uiMessages,
           // 助手消息 ID 由服务端生成，流结束后使用同一个 ID 保存。
@@ -177,32 +235,20 @@ export const chatRoute = new Hono()
             modelId: selectedModelId,
           }),
           // 流正常结束或被用户停止后，保存已生成内容、结束原因和 token 用量。
-          onFinish: async ({ responseMessage, isAborted }) => {
+          onEnd: async ({ responseMessage, isAborted, finishReason }) => {
             try {
               /**
-               * 中止发生在模型正常结束之前时，这两个 Promise 可能拒绝。
+               * 中止发生在模型正常结束之前时，usage Promise 可能拒绝。
                * allSettled 可以保证部分回复仍然落库；正常完成时则继续暴露异常。
                */
-              const [finishReasonResult, usageResult] =
-                await Promise.allSettled([
-                  result.finishReason,
-                  result.totalUsage,
-                ])
+              const [usageResult] = await Promise.allSettled([result.usage])
 
               if (!isAborted) {
-                if (finishReasonResult.status === "rejected") {
-                  throw finishReasonResult.reason
-                }
-
                 if (usageResult.status === "rejected") {
                   throw usageResult.reason
                 }
               }
 
-              const finishReason =
-                finishReasonResult.status === "fulfilled"
-                  ? finishReasonResult.value
-                  : "other"
               const usage =
                 usageResult.status === "fulfilled" ? usageResult.value : null
 
@@ -215,7 +261,7 @@ export const chatRoute = new Hono()
                   modelId: selectedModelId,
                   isAborted,
                 },
-                finishReason,
+                finishReason: finishReason ?? "other",
                 promptTokens: usage?.inputTokens ?? null,
                 completionTokens: usage?.outputTokens ?? null,
               })
@@ -235,6 +281,11 @@ export const chatRoute = new Hono()
             console.error("Chat response stream failed", error)
             return "生成回复失败，请稍后重试。"
           },
+        })
+
+        return createUIMessageStreamResponse({
+          stream: uiMessageStream,
+          consumeSseStream: consumeStream,
         })
       } catch (error) {
         throwApiError(error, "Failed to send chat message")

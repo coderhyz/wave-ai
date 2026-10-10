@@ -43,8 +43,8 @@ import { cn } from "@/lib/utils"
 import type { ChatStatus, FileUIPart, SourceDocumentUIPart } from "ai"
 import {
   CornerDownLeftIcon,
-  ImageIcon,
   Monitor,
+  PaperclipIcon,
   PlusIcon,
   SquareIcon,
   XIcon,
@@ -429,7 +429,7 @@ export const PromptInputActionAddAttachments = ({
 
   return (
     <DropdownMenuItem {...props} onSelect={handleSelect}>
-      <ImageIcon className="mr-2 size-4" /> {label}
+      <PaperclipIcon className="mr-2 size-4" /> {label}
     </DropdownMenuItem>
   )
 }
@@ -563,6 +563,10 @@ export const PromptInput = ({
         .filter(Boolean)
 
       return patterns.some((pattern) => {
+        if (pattern.startsWith(".")) {
+          return f.name.toLowerCase().endsWith(pattern.toLowerCase())
+        }
+
         if (pattern.endsWith("/*")) {
           // e.g: image/* -> image/
           const prefix = pattern.slice(0, -1)

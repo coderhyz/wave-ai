@@ -22,7 +22,7 @@ export class ChatOwnershipError extends Error {
  */
 export class MessageConflictError extends Error {
   constructor() {
-    super("Message id already belongs to another chat")
+    super("消息已经归属于其他会话")
     this.name = "MessageConflictError"
   }
 }

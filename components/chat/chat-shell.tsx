@@ -3,18 +3,21 @@
 import { useCallback, useState } from "react"
 import type { UIMessage } from "ai"
 import { LoaderCircle, MessageCircle, SquareTerminal } from "lucide-react"
+import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion"
 import { ChatComposer } from "@/components/chat/chat-composer"
 import { MessageList } from "@/components/chat/message-list"
 import { useAiChat } from "@/hooks/use-ai-chat"
 import { useChatDetail } from "@/hooks/use-chat-list"
 import { DEFAULT_MODEL_ID, type ChatModelId } from "@/lib/ai/model"
+import { resolveChatModelId } from "@/lib/ai/model"
+import { toast } from "sonner"
 
 interface ChatShellProps {
   chatId: string
   loadHistory?: boolean
 }
-
+// 预制提示词
 const presetPrompts = [
   {
     label: "和 DeepSeek 对话",
@@ -68,21 +71,35 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
   const [input, setInput] = useState("")
   const [selectedModelId, setSelectedModelId] =
     useState<ChatModelId>(DEFAULT_MODEL_ID)
+  // 消息的hooks
   const { messages, status, error, sendText, regenerate, stop, clearError } =
     useAiChat({ chatId, initialMessages, selectedModelId })
-
+  // 发送文本和附件，清除错误状态
   const handleSubmit = useCallback(
-    async (text: string) => {
+    async ({ text, files }: PromptInputMessage) => {
       clearError()
-      return sendText(text)
+      const hasImageInput = files.some((file) =>
+        file.mediaType.startsWith("image/")
+      )
+      const effectiveModelId = resolveChatModelId(
+        selectedModelId,
+        hasImageInput
+      )
+
+      if (effectiveModelId !== selectedModelId) {
+        setSelectedModelId(effectiveModelId)
+        toast.info("图片消息已自动切换到 Qwen 3.7 Flash 视觉模型")
+      }
+
+      return sendText(text, files, effectiveModelId)
     },
-    [clearError, sendText]
+    [clearError, selectedModelId, sendText]
   )
 
   const handleRetry = useCallback(() => {
     void regenerate()
   }, [regenerate])
-
+  // 重新生成
   const handleRegenerate = useCallback(
     (messageId: string) => {
       void regenerate(messageId)
@@ -109,7 +126,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
               value={input}
               variant="hero"
             />
-
+            {/* 预制提示词部分 */}
             <Suggestions className="mx-auto mt-8 justify-center px-2 pb-2">
               {presetPrompts.map(({ label, prompt, icon: Icon }) => (
                 <Suggestion
@@ -128,6 +145,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
       ) : (
         <section className="relative flex min-h-0 flex-1 flex-col">
           <MessageList
+            chatId={chatId}
             error={error}
             messages={messages}
             onRegenerate={handleRegenerate}

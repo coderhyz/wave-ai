@@ -1,8 +1,8 @@
 "use client"
 
-import { useCallback } from "react"
-import { useChat } from "@ai-sdk/react"
-import { DefaultChatTransport, type UIMessage } from "ai"
+import { useCallback, useEffect, useMemo } from "react"
+import { Chat, useChat } from "@ai-sdk/react"
+import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai"
 import { useQueryClient } from "@tanstack/react-query"
 import type { ChatModelId } from "@/lib/ai/model"
 import { fetchWithAuth } from "@/lib/hono/hono-rpc"
@@ -60,6 +60,14 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
   },
 })
 
+/**
+ * 保存仍在生成中的 Chat 实例。
+ *
+ * 普通 useChat 会在组件卸载时调用 stop；把 Chat 作为外部实例传入后，
+ * Dashboard 内切换页面只会取消 UI 订阅，不会中断正在消费的响应流。
+ */
+const backgroundChats = new Map<string, Chat<UIMessage>>()
+
 export interface UseAiChatOptions {
   /** 当前会话 UUID。 */
   chatId: string
@@ -93,55 +101,113 @@ export const useAiChat = ({
   const queryClient = useQueryClient()
 
   /**
-   * AI SDK 负责保存前端消息、解析服务端数据流，并维护请求生命周期。
-   * initialMessages 只用于 Hook 首次创建时初始化历史记录。
+   * 同一个 chatId 在页面切换前后复用同一实例。
+   * 生成完成或失败后移出缓存，下一次进入页面便从数据库读取最终结果。
    */
-  const chat = useChat({
-    id: chatId,
-    messages: initialMessages,
-    transport: chatTransport,
-    /** 降低流式 token 触发的 React 更新频率，长回复时滚动和输入保持流畅。 */
-    experimental_throttle: 50,
+  const chatInstance = useMemo(() => {
+    const existingChat = backgroundChats.get(chatId)
+    if (existingChat) {
+      return existingChat
+    }
 
-    /** 助手回复接收完成后，使会话标题、时间和消息缓存重新获取。 */
-    onFinish: () => {
+    const refreshQueries = () => {
       void queryClient.invalidateQueries({ queryKey: ["chats"] })
       void queryClient.invalidateQueries({ queryKey: ["chat", chatId] })
-    },
+    }
+
+    const instance = new Chat<UIMessage>({
+      id: chatId,
+      messages: initialMessages,
+      transport: chatTransport,
+      onFinish: () => {
+        refreshQueries()
+        if (backgroundChats.get(chatId) === instance) {
+          backgroundChats.delete(chatId)
+        }
+      },
+      onError: () => {
+        refreshQueries()
+        if (backgroundChats.get(chatId) === instance) {
+          backgroundChats.delete(chatId)
+        }
+      },
+    })
+
+    backgroundChats.set(chatId, instance)
+    return instance
+  }, [chatId, initialMessages, queryClient])
+
+  /**
+   * 传入外部 Chat 实例后，useChat 只负责订阅状态；组件卸载不会自动 stop。
+   */
+  const chat = useChat({
+    chat: chatInstance,
+    /** 降低流式 token 触发的 React 更新频率，长回复时滚动和输入保持流畅。 */
+    throttle: 50,
   })
+
+  /** 没有后台任务的实例无需跨页面保留，避免空会话长期占用内存。 */
+  useEffect(() => {
+    // React Strict Mode 会执行一次额外的挂载/卸载检查，setup 时重新登记可避免开发环境丢失实例。
+    backgroundChats.set(chatId, chatInstance)
+
+    return () => {
+      const currentChat = backgroundChats.get(chatId)
+      const isGenerating =
+        currentChat?.status === "submitted" ||
+        currentChat?.status === "streaming"
+
+      if (currentChat === chatInstance && !isGenerating) {
+        backgroundChats.delete(chatId)
+      }
+    }
+  }, [chatId, chatInstance])
 
   /** submitted 表示等待首个数据块，streaming 表示正在接收内容。 */
   const isGenerating =
     chat.status === "submitted" || chat.status === "streaming"
 
   /**
-   * 发送一条纯文本用户消息。
+   * 发送一条用户消息，文本和附件都会成为同一条 UIMessage 的 parts。
    *
    * @param text 输入框中的原始文本。
-   * @returns 成功发起请求时返回 true；空文本或生成期间返回 false。
+   * @param files 已转换为 data URL 的附件。
+   * @returns 成功发起请求时返回 true；空消息或生成期间返回 false。
    */
   const sendText = useCallback(
-    async (text: string) => {
+    async (
+      text: string,
+      files: FileUIPart[] = [],
+      modelId: ChatModelId = selectedModelId
+    ) => {
       /** 不把用户误输入的首尾空格写入消息。 */
       const content = text.trim()
 
-      /** 防止发送空消息和流式生成期间重复提交。 */
-      if (!content || isGenerating) {
+      /** 允许单独发送附件，但不允许完全空的消息或并发提交。 */
+      if ((!content && files.length === 0) || isGenerating) {
         return false
       }
 
       /** 新请求开始前清除上一轮错误状态。 */
       chat.clearError()
+      backgroundChats.set(chatId, chatInstance)
 
       /**
        * text 由 AI SDK 转换成 UIMessage text part；模型与工具放在请求
        * options.body 中，由 chatTransport 合并到最终请求体。
        */
       await chat.sendMessage(
-        { text: content },
+        {
+          text: content,
+          files,
+          metadata: {
+            createdAt: new Date().toISOString(),
+            modelId,
+          },
+        },
         {
           body: {
-            selectedModelId,
+            selectedModelId: modelId,
             selectedToolName,
           },
         }
@@ -149,7 +215,14 @@ export const useAiChat = ({
 
       return true
     },
-    [chat, isGenerating, selectedModelId, selectedToolName]
+    [
+      chat,
+      chatId,
+      chatInstance,
+      isGenerating,
+      selectedModelId,
+      selectedToolName,
+    ]
   )
 
   /**
@@ -167,6 +240,7 @@ export const useAiChat = ({
 
       /** 使用当前模型重新请求，并让服务端通过 trigger 识别重新生成。 */
       chat.clearError()
+      backgroundChats.set(chatId, chatInstance)
       await chat.regenerate({
         messageId,
         body: {
@@ -177,7 +251,14 @@ export const useAiChat = ({
 
       return true
     },
-    [chat, isGenerating, selectedModelId, selectedToolName]
+    [
+      chat,
+      chatId,
+      chatInstance,
+      isGenerating,
+      selectedModelId,
+      selectedToolName,
+    ]
   )
 
   /**

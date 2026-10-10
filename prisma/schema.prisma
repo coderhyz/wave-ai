@@ -21,51 +21,55 @@ model User {
   /**
    * Better Auth 生成的用户唯一标识。
    */
-  id             String          @id
+  id              String           @id
   /**
    * 用户显示名称。
    */
-  name           String
+  name            String
   /**
    * 登录邮箱，同一邮箱只能注册一次。
    */
-  email          String
+  email           String
   /**
    * 邮箱是否已经完成验证。
    */
-  emailVerified  Boolean         @default(false)
+  emailVerified   Boolean          @default(false)
   /**
    * 用户头像地址。
    */
-  image          String?
+  image           String?
   /**
    * 用户注册时间。
    */
-  createdAt      DateTime        @default(now())
+  createdAt       DateTime         @default(now())
   /**
    * 用户资料最后更新时间。
    */
-  updatedAt      DateTime        @updatedAt
+  updatedAt       DateTime         @updatedAt
   /**
    * 当前用户创建的登录会话。
    */
-  sessions       Session[]
+  sessions        Session[]
   /**
    * 当前用户绑定的登录方式或第三方账号。
    */
-  accounts       Account[]
+  accounts        Account[]
   /**
    * 当前用户创建的笔记。
    */
-  notes          Note[]
+  notes           Note[]
   /**
    * 用户拥有的私有文档知识库。
    */
-  knowledgeBases KnowledgeBase[]
+  knowledgeBases  KnowledgeBase[]
   /**
    * 当前用户创建的 AI 会话。
    */
-  chats          Chat[]
+  chats           Chat[]
+  /**
+   * 用户上传到私有 OSS Bucket 的聊天附件。
+   */
+  chatAttachments ChatAttachment[]
 
   /**
    * 保证邮箱唯一。
@@ -290,7 +294,7 @@ model Message {
   /**
    * 消息唯一标识，由客户端或流式响应服务端生成，用于请求幂等。
    */
-  id               String   @id
+  id               String           @id
   /**
    * 消息发送方角色。
    */
@@ -322,11 +326,11 @@ model Message {
   /**
    * 消息创建时间。
    */
-  createdAt        DateTime @default(now())
+  createdAt        DateTime         @default(now())
   /**
    * 消息最后更新时间。
    */
-  updatedAt        DateTime @updatedAt
+  updatedAt        DateTime         @updatedAt
   /**
    * 消息所属会话的 ID。
    */
@@ -334,13 +338,44 @@ model Message {
   /**
    * 消息所属会话；删除会话时级联删除全部消息。
    */
-  chat             Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  chat             Chat             @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  /**
+   * 原文件位于 OSS；消息 parts 中只保存站内受鉴权地址。
+   */
+  attachments      ChatAttachment[]
 
   /**
    * 支持按会话和创建时间正序读取完整上下文。
    */
   @@index([chatId, createdAt])
   @@map("messages")
+}
+
+/**
+ * 聊天附件元数据。上传完成后先保持 messageId 为空；消息成功落库时再认领，
+ * 从而避免把 Base64/Data URL 写入 messages.parts。
+ */
+model ChatAttachment {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messageId      String?
+  message        Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  storageKey     String   @unique
+  filename       String
+  mediaType      String
+  sizeBytes      Int
+  checksumSha256 String
+  /**
+   * 文本文档在上传时只解析一次，后续模型请求直接复用。
+   */
+  extractedText  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([messageId])
+  @@map("chat_attachments")
 }
 
 /**

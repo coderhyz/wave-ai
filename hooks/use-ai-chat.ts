@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { Chat, useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai"
 import { useQueryClient } from "@tanstack/react-query"
@@ -13,6 +13,44 @@ import { fetchWithAuth } from "@/lib/hono/hono-rpc"
  * 未配置 NEXT_PUBLIC_APP_URL 时使用当前站点的相对地址。
  */
 const appUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? ""
+
+interface UploadedAttachment {
+  id: string
+  url: string
+  filename: string
+  mediaType: string
+}
+
+/** 先把浏览器中的临时 Data URL 写入 OSS，再把稳定的站内地址交给 AI SDK。 */
+const uploadAttachment = async (file: FileUIPart) => {
+  const response = await fetchWithAuth(`${appUrl}/api/chat/attachments`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: file.url,
+      mediaType: file.mediaType,
+      filename: file.filename,
+    }),
+  })
+
+  const payload = (await response.json().catch(() => null)) as {
+    attachment?: UploadedAttachment
+    message?: string
+  } | null
+  if (!response.ok || !payload?.attachment) {
+    throw new Error(payload?.message || "附件上传失败，请稍后重试")
+  }
+  return payload.attachment
+}
+
+/** 发送失败时回收尚未被消息认领的附件；已认领附件会由服务端拒绝删除。 */
+const deletePendingAttachment = async (id: string) => {
+  await fetchWithAuth(`${appUrl}/api/chat/attachments/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  })
+}
 
 /**
  * AI SDK 使用的流式请求 transport。
@@ -99,6 +137,7 @@ export const useAiChat = ({
 }: UseAiChatOptions) => {
   /** 用于在回复完成后刷新会话列表和会话详情。 */
   const queryClient = useQueryClient()
+  const [isUploading, setIsUploading] = useState(false)
 
   /**
    * 同一个 chatId 在页面切换前后复用同一实例。
@@ -165,13 +204,13 @@ export const useAiChat = ({
 
   /** submitted 表示等待首个数据块，streaming 表示正在接收内容。 */
   const isGenerating =
-    chat.status === "submitted" || chat.status === "streaming"
+    isUploading || chat.status === "submitted" || chat.status === "streaming"
 
   /**
    * 发送一条用户消息，文本和附件都会成为同一条 UIMessage 的 parts。
    *
    * @param text 输入框中的原始文本。
-   * @param files 已转换为 data URL 的附件。
+   * @param files 浏览器中已转换为 Data URL 的临时附件；发送前会先写入 OSS。
    * @returns 成功发起请求时返回 true；空消息或生成期间返回 false。
    */
   const sendText = useCallback(
@@ -192,26 +231,48 @@ export const useAiChat = ({
       chat.clearError()
       backgroundChats.set(chatId, chatInstance)
 
-      /**
-       * text 由 AI SDK 转换成 UIMessage text part；模型与工具放在请求
-       * options.body 中，由 chatTransport 合并到最终请求体。
-       */
-      await chat.sendMessage(
-        {
-          text: content,
-          files,
-          metadata: {
-            createdAt: new Date().toISOString(),
-            modelId,
-          },
-        },
-        {
-          body: {
-            selectedModelId: modelId,
-            selectedToolName,
-          },
+      const uploadedIds: string[] = []
+      setIsUploading(files.length > 0)
+
+      try {
+        const storedFiles: FileUIPart[] = []
+        for (const file of files) {
+          const attachment = await uploadAttachment(file)
+          uploadedIds.push(attachment.id)
+          storedFiles.push({
+            type: "file",
+            url: attachment.url,
+            filename: attachment.filename,
+            mediaType: attachment.mediaType,
+          })
         }
-      )
+
+        /**
+         * text 由 AI SDK 转换成 UIMessage text part；模型与工具放在请求
+         * options.body 中，由 chatTransport 合并到最终请求体。
+         */
+        await chat.sendMessage(
+          {
+            text: content,
+            files: storedFiles,
+            metadata: {
+              createdAt: new Date().toISOString(),
+              modelId,
+            },
+          },
+          {
+            body: {
+              selectedModelId: modelId,
+              selectedToolName,
+            },
+          }
+        )
+      } catch (error) {
+        await Promise.allSettled(uploadedIds.map(deletePendingAttachment))
+        throw error
+      } finally {
+        setIsUploading(false)
+      }
 
       return true
     },
@@ -278,6 +339,8 @@ export const useAiChat = ({
     error: chat.error,
     /** 是否正在等待或接收模型回复。 */
     isGenerating,
+    /** 是否正在把本地附件写入 OSS。 */
+    isUploading,
     /** 输入框当前是否允许提交。 */
     canSubmit: !isGenerating,
     sendText,

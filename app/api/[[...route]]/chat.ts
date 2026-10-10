@@ -24,10 +24,19 @@ import {
 } from "@/lib/chat/schemas"
 import { toUIMessage } from "@/lib/chat/mapper"
 import {
-  createAttachmentPreparer,
   decodeAttachmentDataUrl,
   extractDocumentText,
+  MAX_ATTACHMENT_BYTES,
 } from "@/lib/chat/model-attachments"
+import { createStoredAttachmentPreparer } from "@/lib/chat-attachment-preparer"
+import {
+  claimMessageAttachments,
+  createStoredAttachmentResolver,
+  deleteOssObjectsBestEffort,
+  deletePendingChatAttachment,
+  readOwnedChatAttachment,
+  uploadChatAttachment,
+} from "@/lib/chat-attachment-storage"
 import {
   ChatOwnershipError,
   getOrCreateOwnedChat,
@@ -35,6 +44,15 @@ import {
   saveMessageOnce,
 } from "@/lib/chat/persistence"
 import prisma from "@/lib/prisma"
+
+const attachmentIdSchema = z.object({ id: z.string().uuid() }).strict()
+const uploadAttachmentSchema = z
+  .object({
+    url: z.string().max(MAX_ATTACHMENT_BYTES * 2),
+    mediaType: z.string().max(200),
+    filename: z.string().trim().min(1).max(255).optional(),
+  })
+  .strict()
 
 /**
  * 把聊天业务或数据库错误转换成接口状态码。
@@ -60,6 +78,9 @@ const throwApiError = (error: unknown, fallbackMessage: string): never => {
 /**
  * 聊天接口路由。route.ts 会把它挂载到 /api/chat：
  * POST /                 发送消息并返回流式回复
+ * POST /attachments      上传聊天附件到私有 OSS
+ * GET /attachments/:id   读取属于当前用户的 OSS 附件
+ * DELETE /attachments/:id 删除尚未发送的 OSS 附件
  * POST /attachments/preview  提取 PDF/DOCX 文字
  * GET /                  获取会话列表
  * GET /:id               获取会话详情
@@ -67,6 +88,74 @@ const throwApiError = (error: unknown, fallbackMessage: string): never => {
  * DELETE /:id            删除会话
  */
 export const chatRoute = new Hono()
+  .post(
+    "/attachments",
+    getAuthUser,
+    bodyLimit({ maxSize: 3 * 1024 * 1024 }),
+    zValidator("json", uploadAttachmentSchema),
+    async (c) => {
+      try {
+        const user = c.get("user")
+        const attachment = await uploadChatAttachment({
+          userId: user.id,
+          file: c.req.valid("json"),
+        })
+        return c.json({ success: true, attachment }, 201)
+      } catch (error) {
+        return throwApiError(error, "附件上传失败")
+      }
+    }
+  )
+  .get(
+    "/attachments/:id",
+    getAuthUser,
+    zValidator("param", attachmentIdSchema),
+    async (c) => {
+      try {
+        const user = c.get("user")
+        const { id } = c.req.valid("param")
+        const { attachment, content } = await readOwnedChatAttachment(
+          user.id,
+          id
+        )
+        const fallbackName = attachment.filename
+          .replace(/[^\x20-\x7e]/g, "_")
+          .replace(/["\\]/g, "_")
+        const encodedName = encodeURIComponent(attachment.filename)
+
+        return new Response(new Uint8Array(content), {
+          headers: {
+            "Cache-Control": "private, max-age=300",
+            "Content-Disposition": `inline; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
+            "Content-Length": String(content.byteLength),
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Content-Type": attachment.mediaType,
+            "X-Content-Type-Options": "nosniff",
+          },
+        })
+      } catch (error) {
+        return throwApiError(error, "附件读取失败")
+      }
+    }
+  )
+  .delete(
+    "/attachments/:id",
+    getAuthUser,
+    zValidator("param", attachmentIdSchema),
+    async (c) => {
+      try {
+        const user = c.get("user")
+        const { id } = c.req.valid("param")
+        const deleted = await deletePendingChatAttachment(user.id, id)
+        if (!deleted) {
+          throw new HTTPException(404, { message: "Attachment not found" })
+        }
+        return c.json({ success: true })
+      } catch (error) {
+        return throwApiError(error, "附件删除失败")
+      }
+    }
+  )
   .post(
     "/attachments/preview",
     getAuthUser,
@@ -130,7 +219,9 @@ export const chatRoute = new Hono()
         )
 
         // 同一次请求复用解析缓存，避免附件在校验和生成前重复解析。
-        const prepareMessagesForModel = createAttachmentPreparer()
+        const prepareMessagesForModel = createStoredAttachmentPreparer(
+          createStoredAttachmentResolver(user.id)
+        )
         await prepareMessagesForModel([message])
 
         // 首条消息创建会话；已有会话则检查它是否属于当前用户。
@@ -148,6 +239,7 @@ export const chatRoute = new Hono()
           modelId: selectedModelId,
           metadata: message.metadata,
         })
+        await claimMessageAttachments(user.id, message)
 
         let storedMessages = await prisma.message.findMany({
           where: { chatId: id },
@@ -166,12 +258,19 @@ export const chatRoute = new Hono()
               .map((storedMessage) => storedMessage.id)
 
             if (laterMessageIds.length > 0) {
+              const removedAttachments = await prisma.chatAttachment.findMany({
+                where: { messageId: { in: laterMessageIds }, userId: user.id },
+                select: { storageKey: true },
+              })
               await prisma.message.deleteMany({
                 where: {
                   chatId: id,
                   id: { in: laterMessageIds },
                 },
               })
+              await deleteOssObjectsBestEffort(
+                removedAttachments.map(({ storageKey }) => storageKey)
+              )
               storedMessages = storedMessages.slice(0, messageIndex + 1)
             }
           } else if (messageIndex !== storedMessages.length - 1) {
@@ -383,6 +482,13 @@ export const chatRoute = new Hono()
     try {
       const user = c.get("user")
       const { id } = c.req.valid("param")
+      const attachments = await prisma.chatAttachment.findMany({
+        where: {
+          userId: user.id,
+          message: { chatId: id },
+        },
+        select: { storageKey: true },
+      })
 
       const result = await prisma.chat.deleteMany({
         where: { id, userId: user.id },
@@ -393,6 +499,10 @@ export const chatRoute = new Hono()
           message: "Chat not found",
         })
       }
+
+      await deleteOssObjectsBestEffort(
+        attachments.map(({ storageKey }) => storageKey)
+      )
 
       return c.json({ success: true })
     } catch (error) {

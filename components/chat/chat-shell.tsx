@@ -72,8 +72,16 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
   const [selectedModelId, setSelectedModelId] =
     useState<ChatModelId>(DEFAULT_MODEL_ID)
   // 消息的hooks
-  const { messages, status, error, sendText, regenerate, stop, clearError } =
-    useAiChat({ chatId, initialMessages, selectedModelId })
+  const {
+    messages,
+    status,
+    error,
+    isUploading,
+    sendText,
+    regenerate,
+    stop,
+    clearError,
+  } = useAiChat({ chatId, initialMessages, selectedModelId })
   // 发送文本和附件，清除错误状态
   const handleSubmit = useCallback(
     async ({ text, files }: PromptInputMessage) => {
@@ -91,7 +99,16 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
         toast.info("图片消息已自动切换到 Qwen 3.7 Flash 视觉模型")
       }
 
-      return sendText(text, files, effectiveModelId)
+      try {
+        return await sendText(text, files, effectiveModelId)
+      } catch (submitError) {
+        toast.error(
+          submitError instanceof Error
+            ? submitError.message
+            : "消息发送失败，请稍后重试"
+        )
+        throw submitError
+      }
     },
     [clearError, selectedModelId, sendText]
   )
@@ -122,7 +139,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
               onSubmit={handleSubmit}
               onValueChange={setInput}
               selectedModelId={selectedModelId}
-              status={status}
+              status={isUploading ? "submitted" : status}
               value={input}
               variant="hero"
             />
@@ -161,7 +178,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
                 onSubmit={handleSubmit}
                 onValueChange={setInput}
                 selectedModelId={selectedModelId}
-                status={status}
+                status={isUploading ? "submitted" : status}
                 value={input}
               />
               <p className="mt-2 text-center text-xs text-muted-foreground">

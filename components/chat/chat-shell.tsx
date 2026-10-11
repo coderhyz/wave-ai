@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useLayoutEffect } from "react"
 import type { UIMessage } from "ai"
 import { LoaderCircle, MessageCircle, SquareTerminal } from "lucide-react"
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
@@ -9,8 +9,13 @@ import { ChatComposer } from "@/components/chat/chat-composer"
 import { MessageList } from "@/components/chat/message-list"
 import { useAiChat } from "@/hooks/use-ai-chat"
 import { useChatDetail } from "@/hooks/use-chat-list"
-import { DEFAULT_MODEL_ID, type ChatModelId } from "@/lib/ai/model"
-import { resolveChatModelId } from "@/lib/ai/model"
+import {
+  chatModels,
+  DEFAULT_MODEL_ID,
+  resolveChatModelId,
+  type ChatModelId,
+} from "@/lib/ai/model"
+import { useChatUiStore } from "@/stores/chat-ui-store"
 import { toast } from "sonner"
 
 interface ChatShellProps {
@@ -52,9 +57,15 @@ export function ChatShell({ chatId, loadHistory = false }: ChatShellProps) {
     )
   }
 
+  /** 优先使用会话保存的模型；历史值无效时回退到系统默认模型。 */
+  const initialModelId =
+    chatModels.find((model) => model.id === data?.chat.modelId)?.id ??
+    DEFAULT_MODEL_ID
+
   return (
     <ChatSession
       chatId={chatId}
+      initialModelId={initialModelId}
       initialMessages={data?.messages ?? []}
       key={chatId}
     />
@@ -63,14 +74,43 @@ export function ChatShell({ chatId, loadHistory = false }: ChatShellProps) {
 
 interface ChatSessionProps {
   chatId: string
+  initialModelId: ChatModelId
   initialMessages: UIMessage[]
 }
 
 /** 聊天页的交互容器，连接 useAiChat、消息列表和输入区。 */
-function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
-  const [input, setInput] = useState("")
-  const [selectedModelId, setSelectedModelId] =
-    useState<ChatModelId>(DEFAULT_MODEL_ID)
+function ChatSession({
+  chatId,
+  initialModelId,
+  initialMessages,
+}: ChatSessionProps) {
+  /**
+   * 每个 selector 只订阅当前组件需要的字段，避免 Store 中其他会话变化时
+   * 让当前聊天页发生无关重渲染。
+   */
+  const hasHydrated = useChatUiStore((state) => state.hasHydrated)
+  const input = useChatUiStore((state) => state.chats[chatId]?.draft ?? "")
+  const selectedModelId = useChatUiStore(
+    (state) => state.chats[chatId]?.selectedModelId ?? initialModelId
+  )
+  const setDraft = useChatUiStore((state) => state.setDraft)
+  const setSelectedModel = useChatUiStore((state) => state.setSelectedModel)
+
+  /** 客户端挂载后恢复 sessionStorage，避免服务端与首屏状态不一致。 */
+  useLayoutEffect(() => {
+    if (!hasHydrated) void useChatUiStore.persist.rehydrate()
+  }, [hasHydrated])
+
+  /** 将输入框变化写入当前 chatId 对应的草稿。 */
+  const handleInputChange = useCallback(
+    (value: string) => setDraft(chatId, value),
+    [chatId, setDraft]
+  )
+  /** 将模型选择写入当前 chatId，切换会话后可分别恢复。 */
+  const handleModelChange = useCallback(
+    (modelId: ChatModelId) => setSelectedModel(chatId, modelId),
+    [chatId, setSelectedModel]
+  )
   // 消息的hooks
   const {
     messages,
@@ -86,16 +126,18 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
   const handleSubmit = useCallback(
     async ({ text, files }: PromptInputMessage) => {
       clearError()
+      /** 图片附件需要支持视觉能力的模型。 */
       const hasImageInput = files.some((file) =>
         file.mediaType.startsWith("image/")
       )
+      /** 普通文本沿用用户选择；图片输入由模型解析函数决定是否切换。 */
       const effectiveModelId = resolveChatModelId(
         selectedModelId,
         hasImageInput
       )
 
       if (effectiveModelId !== selectedModelId) {
-        setSelectedModelId(effectiveModelId)
+        setSelectedModel(chatId, effectiveModelId)
         toast.info("图片消息已自动切换到 Qwen 3.7 Flash 视觉模型")
       }
 
@@ -110,7 +152,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
         throw submitError
       }
     },
-    [clearError, selectedModelId, sendText]
+    [chatId, clearError, selectedModelId, sendText, setSelectedModel]
   )
 
   const handleRetry = useCallback(() => {
@@ -124,6 +166,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
     [regenerate]
   )
 
+  /** 空会话展示欢迎页，已有消息时展示消息列表和底部输入框。 */
   const isEmpty = messages.length === 0
 
   return (
@@ -134,10 +177,10 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
         <section className="relative flex flex-1 flex-col items-center px-4 pt-[clamp(3rem,12vh,8rem)] md:px-8">
           <div className="w-full max-w-5xl">
             <ChatComposer
-              onModelChange={setSelectedModelId}
+              onModelChange={handleModelChange}
               onStop={stop}
               onSubmit={handleSubmit}
-              onValueChange={setInput}
+              onValueChange={handleInputChange}
               selectedModelId={selectedModelId}
               status={isUploading ? "submitted" : status}
               value={input}
@@ -149,7 +192,7 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
                 <Suggestion
                   className="h-11 border-border/80 bg-background/70 px-5 text-sm shadow-xs backdrop-blur-sm hover:border-primary/30 hover:bg-primary/5 hover:text-primary md:text-base"
                   key={label}
-                  onClick={setInput}
+                  onClick={handleInputChange}
                   suggestion={prompt}
                 >
                   <Icon className="size-4" />
@@ -173,10 +216,10 @@ function ChatSession({ chatId, initialMessages }: ChatSessionProps) {
           <div className="border-t border-border/60 bg-background/80 px-4 py-3 backdrop-blur-xl md:px-8 md:py-4">
             <div className="mx-auto w-full max-w-4xl">
               <ChatComposer
-                onModelChange={setSelectedModelId}
+                onModelChange={handleModelChange}
                 onStop={stop}
                 onSubmit={handleSubmit}
-                onValueChange={setInput}
+                onValueChange={handleInputChange}
                 selectedModelId={selectedModelId}
                 status={isUploading ? "submitted" : status}
                 value={input}

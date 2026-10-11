@@ -1,7 +1,8 @@
 "use client"
 
-import { memo, useLayoutEffect } from "react"
+import { memo, useCallback, useLayoutEffect, useRef } from "react"
 import type { ChatStatus, UIMessage } from "ai"
+import { useVirtualizer } from "@tanstack/react-virtual"
 import { Copy, Download, LoaderCircle, RefreshCcw } from "lucide-react"
 import { toast } from "sonner"
 import { useStickToBottom } from "use-stick-to-bottom"
@@ -27,51 +28,38 @@ import {
 } from "@/components/ai-elements/reasoning"
 import { Button } from "@/components/ui/button"
 import { chatModels } from "@/lib/ai/model"
+import { useChatUiStore } from "@/stores/chat-ui-store"
 
-/**
- * 一级内存缓存：在 Dashboard 内切换会话再切回来时，可以立即恢复滚动位置。
- * sessionStorage 是二级缓存，负责页面刷新后的恢复；两级缓存都只保存 scrollTop。
- */
-const conversationScrollPositions = new Map<string, number>()
+/** 短列表直接渲染更简单；达到该数量后才启用虚拟列表。 */
+const VIRTUALIZATION_THRESHOLD = 50
+/** 可视区域上下各多渲染的消息数量，用少量 DOM 换取连续滚动体验。 */
+const MESSAGE_OVERSCAN = 4
 
-const getConversationScrollStorageKey = (chatId: string) =>
-  `wave-ai:conversation-scroll:${chatId}`
+/** 在真实 DOM 高度测量完成前，为不同内容提供较接近的初始高度。 */
+const estimateMessageHeight = (message?: UIMessage) => {
+  if (!message) return 160
 
-const readConversationScrollTop = (chatId: string) => {
-  /** 内存读取没有序列化开销，因此优先于 sessionStorage。 */
-  const cachedScrollTop = conversationScrollPositions.get(chatId)
-  if (cachedScrollTop !== undefined) return cachedScrollTop
+  /** 文本长度用于粗略估算尚未挂载到 DOM 的消息高度。 */
+  const text = message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("")
+  /** 限制文本预估的最大增量，避免超长消息制造过大的初始占位。 */
+  const textHeight = Math.min(600, Math.ceil(text.length / 120) * 28)
+  /** reasoning、附件和代码块通常比纯文本高，分别增加经验高度。 */
+  const reasoningHeight = message.parts.some(
+    (part) => part.type === "reasoning"
+  )
+    ? 180
+    : 0
+  const attachmentHeight = message.parts.some((part) => part.type === "file")
+    ? 160
+    : 0
+  const codeHeight = text.includes("```") ? 180 : 0
+  /** 助手消息包含操作栏和模型信息，因此基础高度略大。 */
+  const baseHeight = message.role === "user" ? 96 : 150
 
-  try {
-    const savedValue = sessionStorage.getItem(
-      getConversationScrollStorageKey(chatId)
-    )
-    if (savedValue === null) return null
-
-    const scrollTop = Number(savedValue)
-    if (!Number.isFinite(scrollTop) || scrollTop < 0) return null
-
-    conversationScrollPositions.set(chatId, scrollTop)
-    return scrollTop
-  } catch {
-    /** 隐私模式或浏览器禁用存储时，直接按“没有历史位置”处理。 */
-    return null
-  }
-}
-
-const saveConversationScrollTop = (chatId: string, scrollTop: number) => {
-  /** 防止浏览器在回弹或布局变化期间产生负数滚动位置。 */
-  const safeScrollTop = Math.max(0, scrollTop)
-  conversationScrollPositions.set(chatId, safeScrollTop)
-
-  try {
-    sessionStorage.setItem(
-      getConversationScrollStorageKey(chatId),
-      String(safeScrollTop)
-    )
-  } catch {
-    // 浏览器禁用存储时，内存缓存仍能覆盖当前页面会话间的切换。
-  }
+  return baseHeight + textHeight + reasoningHeight + attachmentHeight + codeHeight
 }
 
 interface ChatMessageMetadata {
@@ -356,6 +344,40 @@ export function MessageList({
     resize: "smooth",
   })
   const { scrollRef, scrollToBottom } = conversationScroll
+  /** 持久化数据恢复完成前不读取滚动位置。 */
+  const hasHydrated = useChatUiStore((state) => state.hasHydrated)
+  /** 保存滚动位置的节流定时器，避免每次 scroll 事件都写 Store。 */
+  const scrollSaveTimer = useRef<number | null>(null)
+
+  /** 短对话保留普通渲染，只有长对话才承担虚拟化复杂度。 */
+  const shouldVirtualize = messages.length >= VIRTUALIZATION_THRESHOLD
+  /** 使用消息 id 作为稳定键，避免增删消息后复用错误的 DOM。 */
+  const getItemKey = useCallback(
+    (index: number) => messages[index]?.id ?? index,
+    [messages]
+  )
+  /** DOM 未挂载时先使用预估高度，挂载后会被真实测量值替换。 */
+  const estimateSize = useCallback(
+    (index: number) => estimateMessageHeight(messages[index]),
+    [messages]
+  )
+  // TanStack Virtual 会自行管理可变 DOM 测量，React Compiler 不应尝试缓存它。
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const virtualizer = useVirtualizer({
+    /** 虚拟项数量始终与消息数量一致。 */
+    count: messages.length,
+    /** 未达到阈值时关闭虚拟计算。 */
+    enabled: shouldVirtualize,
+    estimateSize,
+    getItemKey,
+    /** Conversation 的滚动容器是虚拟列表的观察目标。 */
+    getScrollElement: () => scrollRef.current,
+    overscan: MESSAGE_OVERSCAN,
+    /** 与普通列表的上下内边距保持一致。 */
+    paddingEnd: 32,
+    paddingStart: 32,
+  })
+  /** 仅流式生成阶段持续更新最后一条助手消息。 */
   const isStreaming = status === "streaming"
 
   /** 请求已经提交但助手消息尚未出现时，显示单独的等待占位。 */
@@ -363,6 +385,9 @@ export function MessageList({
     status === "submitted" && messages.at(-1)?.role === "user"
 
   useLayoutEffect(() => {
+    if (!hasHydrated) return
+
+    /** scrollRef 指向 Conversation 内部真正发生滚动的元素。 */
     const scrollElement = scrollRef.current
     if (!scrollElement) return
 
@@ -370,80 +395,139 @@ export function MessageList({
      * useLayoutEffect 在浏览器绘制前恢复位置，减少用户看到“先在顶部、再跳动”的闪烁。
      * 从未访问过的会话直接定位到底部；访问过的会话恢复离开时的位置。
      */
-    const savedScrollTop = readConversationScrollTop(chatId)
-    if (savedScrollTop === null) {
+    /** 直接读取快照，不订阅 chats，滚动写入不会导致列表重渲染。 */
+    const savedScrollTop =
+      useChatUiStore.getState().chats[chatId]?.scrollTop
+    if (savedScrollTop === undefined) {
       void scrollToBottom({ animation: "instant" })
     } else {
       scrollElement.scrollTop = savedScrollTop
     }
 
-    /** passive 监听不会阻塞浏览器滚动；当前位置同时写入两级缓存。 */
+    /** 节流保存，避免滚动事件连续序列化整个 Store。 */
     const handleScroll = () => {
-      saveConversationScrollTop(chatId, scrollElement.scrollTop)
+      if (scrollSaveTimer.current !== null) return
+      scrollSaveTimer.current = window.setTimeout(() => {
+        scrollSaveTimer.current = null
+        useChatUiStore
+          .getState()
+          .setScrollTop(chatId, scrollElement.scrollTop)
+      }, 150)
     }
 
     scrollElement.addEventListener("scroll", handleScroll, { passive: true })
 
     /** 切换会话或卸载前再保存一次，覆盖最后一次尚未触发监听的布局变化。 */
     return () => {
-      saveConversationScrollTop(chatId, scrollElement.scrollTop)
+      if (scrollSaveTimer.current !== null) {
+        window.clearTimeout(scrollSaveTimer.current)
+        scrollSaveTimer.current = null
+      }
+      useChatUiStore.getState().setScrollTop(chatId, scrollElement.scrollTop)
       scrollElement.removeEventListener("scroll", handleScroll)
     }
-  }, [chatId, scrollRef, scrollToBottom])
+  }, [chatId, hasHydrated, scrollRef, scrollToBottom])
+
+  /** 普通列表和虚拟列表共用同一套单条消息渲染逻辑。 */
+  const renderMessage = (index: number) => {
+    const message = messages[index]
+    if (!message) return null
+
+    /**
+     * 旧用户消息可能没有 modelId：读取下一条助手消息，仅用于底部模型标签。
+     * 正常情况下用户消息后面就是对应的助手回复。
+     */
+    const fallbackModelId =
+      message.role === "user"
+        ? getMessageMetadata(messages[index + 1]).modelId
+        : undefined
+
+    return (
+      <ChatMessage
+        fallbackModelId={fallbackModelId}
+        isGenerating={isStreaming || status === "submitted"}
+        isLastMessage={index === messages.length - 1}
+        isStreaming={isStreaming}
+        key={message.id}
+        message={message}
+        onRegenerate={onRegenerate}
+      />
+    )
+  }
 
   return (
     <Conversation className="min-h-0" instance={conversationScroll}>
-      <ConversationContent className="mx-auto w-full max-w-4xl gap-7 px-4 py-8 md:px-8">
-        {messages.map((message, index) => {
-          /**
-           * 旧用户消息可能没有 modelId：读取下一条助手消息仅用于底部模型标签。
-           * 正常情况下用户消息后面就是对应的助手回复。
-           */
-          const fallbackModelId =
-            message.role === "user"
-              ? getMessageMetadata(messages[index + 1]).modelId
-              : undefined
-
-          return (
-            <ChatMessage
-              fallbackModelId={fallbackModelId}
-              isGenerating={isStreaming || status === "submitted"}
-              isLastMessage={index === messages.length - 1}
-              isStreaming={isStreaming}
-              key={message.id}
-              message={message}
-              onRegenerate={onRegenerate}
-            />
-          )
-        })}
-
-        {/* 首个流式消息块到达后，真实助手消息会替换这个等待占位。 */}
-        {isWaitingForAssistant && (
-          <Message from="assistant">
-            <MessageContent className="flex-row items-center gap-2 text-muted-foreground">
-              <LoaderCircle className="size-4 animate-spin text-primary" />
-              正在思考…
-            </MessageContent>
-          </Message>
+      <ConversationContent
+        className={
+          shouldVirtualize
+            ? "block p-0"
+            : "mx-auto w-full max-w-4xl gap-7 px-4 py-8 md:px-8"
+        }
+      >
+        {/* 长列表只挂载可视区域；短列表仍直接渲染全部消息。 */}
+        {shouldVirtualize ? (
+          // 总高度负责撑开滚动区域，未渲染的消息无需保留 DOM。
+          <div
+            className="relative mx-auto w-full max-w-4xl"
+            style={{ height: `${virtualizer.getTotalSize()}px` }}
+          >
+            {/* data-index 和 ref 用于把每条消息的真实高度回写给虚拟列表。 */}
+            {virtualizer.getVirtualItems().map((virtualItem) => (
+              <div
+                className="absolute top-0 left-0 w-full px-4 pb-7 md:px-8"
+                data-index={virtualItem.index}
+                key={virtualItem.key}
+                ref={virtualizer.measureElement}
+                style={{
+                  // 所有虚拟项从容器顶部定位，再移动到计算后的实际位置。
+                  transform: `translateY(${virtualItem.start}px)`,
+                }}
+              >
+                {renderMessage(virtualItem.index)}
+              </div>
+            ))}
+          </div>
+        ) : (
+          messages.map((_message, index) => renderMessage(index))
         )}
 
-        {/* 错误保留在消息列表底部，重试会复用 useAiChat 的 regenerate 流程。 */}
-        {error && (
+        {(isWaitingForAssistant || error) && (
           <div
-            className="flex items-center justify-between gap-3 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive"
-            role="alert"
+            className={
+              shouldVirtualize
+                ? "mx-auto flex w-full max-w-4xl flex-col gap-7 px-4 pb-8 md:px-8"
+                : "contents"
+            }
           >
-            <span>{error.message || "消息发送失败，请稍后重试。"}</span>
-            <Button
-              className="shrink-0"
-              onClick={onRetry}
-              size="sm"
-              type="button"
-              variant="destructive"
-            >
-              <RefreshCcw className="size-4" />
-              重试
-            </Button>
+            {/* 首个流式消息块到达后，真实助手消息会替换这个等待占位。 */}
+            {isWaitingForAssistant && (
+              <Message from="assistant">
+                <MessageContent className="flex-row items-center gap-2 text-muted-foreground">
+                  <LoaderCircle className="size-4 animate-spin text-primary" />
+                  正在思考…
+                </MessageContent>
+              </Message>
+            )}
+
+            {/* 错误保留在消息列表底部，重试会复用 useAiChat 的 regenerate 流程。 */}
+            {error && (
+              <div
+                className="flex items-center justify-between gap-3 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+                role="alert"
+              >
+                <span>{error.message || "消息发送失败，请稍后重试。"}</span>
+                <Button
+                  className="shrink-0"
+                  onClick={onRetry}
+                  size="sm"
+                  type="button"
+                  variant="destructive"
+                >
+                  <RefreshCcw className="size-4" />
+                  重试
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </ConversationContent>

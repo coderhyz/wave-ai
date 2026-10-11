@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { UIMessage } from "ai"
 import { toast } from "sonner"
 import { api } from "@/lib/hono/hono-rpc"
+import { useChatUiStore } from "@/stores/chat-ui-store"
 
 export interface ChatListItem {
   id: string
@@ -125,6 +126,8 @@ export const useDeleteChat = () => {
       return response.json()
     },
     onSuccess: (_, id) => {
+      // 后端删除成功后同步清理该会话的草稿、模型选择和滚动位置。
+      useChatUiStore.getState().removeChat(id)
       queryClient.removeQueries({ queryKey: ["chat", id] })
       queryClient.invalidateQueries({ queryKey: ["chats"] })
     },

@@ -11,6 +11,7 @@ import Logo from "@/components/logo/index" // path to your logo component
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuthToken } from "@/hooks/use-auth-token"
+import { useChatUiStore } from "@/stores/chat-ui-store"
 import { authClient } from "@/lib/auth-client"
 import { toast } from "sonner"
 import NavMenu from "@/components/sidebar/nav-menu"
@@ -66,6 +67,8 @@ function AppSidebar({
         onSuccess: () => {
           // 退出登录成功后，清除认证令牌并重定向到登录页
           clearBearerToken()
+          // 清除当前账号保存在 sessionStorage 中的草稿、模型和滚动位置。
+          useChatUiStore.getState().clearAll()
           router.push("/auth/sign-in")
           setIsSigningOut(false)
         },

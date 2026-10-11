@@ -24,7 +24,9 @@ function loadCodePlugin() {
 }
 
 function loadMathPlugin() {
-  return import("@streamdown/math").then(({ math }) => math)
+  return import("@streamdown/math").then(({ createMathPlugin }) =>
+    createMathPlugin({ singleDollarTextMath: true })
+  )
 }
 
 function loadMermaidPlugin() {
@@ -39,7 +41,7 @@ export function useStreamdownPlugins(content: string): PluginConfig {
   /**
    * 只做轻量正则检测，不在渲染阶段加载插件：
    * - ``` 或 ~~~ 表示围栏代码块；
-   * - $$...$$、\(...\) 或 \[...\] 表示数学公式；
+   * - $...$、$$...$$、\(...\) 或 \[...\] 表示数学公式；
    * - ```mermaid 表示 Mermaid 图表。
    *
    * 流式消息每次增长都会执行 Hook，useMemo 保证只有内容变化时才重新检测。
@@ -47,7 +49,9 @@ export function useStreamdownPlugins(content: string): PluginConfig {
   const requirements = useMemo(
     () => ({
       code: /(?:^|\n)\s*(?:```|~~~)/.test(content),
-      math: /\$\$[\s\S]*?\$\$|\\\(|\\\[/.test(content),
+      math: /\$\$[\s\S]*?\$\$|(^|[^\\$])\$(?!\$)[^\n$]+\$(?!\$)|\\\(|\\\[/.test(
+        content
+      ),
       mermaid: /(?:^|\n)\s*(?:```|~~~)mermaid\b/i.test(content),
     }),
     [content]

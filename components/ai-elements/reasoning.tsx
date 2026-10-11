@@ -7,6 +7,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { useStreamdownPlugins } from "@/components/ai-elements/use-streamdown-plugins"
+import { normalizeMarkdownMath } from "@/lib/chat/normalize-markdown-math"
 import { cn } from "@/lib/utils"
 import { BrainIcon, ChevronDownIcon } from "lucide-react"
 import type { ComponentProps, ReactNode } from "react"
@@ -203,7 +204,8 @@ export type ReasoningContentProps = ComponentProps<
 
 export const ReasoningContent = memo(
   ({ className, children, ...props }: ReasoningContentProps) => {
-    const plugins = useStreamdownPlugins(children)
+    const normalizedChildren = normalizeMarkdownMath(children)
+    const plugins = useStreamdownPlugins(normalizedChildren)
 
     return (
       <CollapsibleContent
@@ -214,7 +216,7 @@ export const ReasoningContent = memo(
         )}
         {...props}
       >
-        <Streamdown plugins={plugins}>{children}</Streamdown>
+        <Streamdown plugins={plugins}>{normalizedChildren}</Streamdown>
       </CollapsibleContent>
     )
   }

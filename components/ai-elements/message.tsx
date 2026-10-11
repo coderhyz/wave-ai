@@ -9,6 +9,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { normalizeMarkdownMath } from "@/lib/chat/normalize-markdown-math"
 import { MessageCodeBlock } from "@/components/ai-elements/code-block-controls"
 import { useStreamdownPlugins } from "@/components/ai-elements/use-streamdown-plugins"
 import type { UIMessage } from "ai"
@@ -322,8 +323,10 @@ const messageComponents = {
 
 export const MessageResponse = memo(
   ({ className, components, children, ...props }: MessageResponseProps) => {
+    const normalizedChildren =
+      typeof children === "string" ? normalizeMarkdownMath(children) : children
     const plugins = useStreamdownPlugins(
-      typeof children === "string" ? children : ""
+      typeof normalizedChildren === "string" ? normalizedChildren : ""
     )
 
     return (
@@ -336,7 +339,7 @@ export const MessageResponse = memo(
         plugins={plugins}
         {...props}
       >
-        {children}
+        {normalizedChildren}
       </Streamdown>
     )
   },

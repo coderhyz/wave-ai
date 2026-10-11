@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* KaTeX 同时生成 MathML 和 HTML；官方样式会隐藏无障碍备用层，避免公式重复显示。 */
+@import "katex/dist/katex.min.css";
 
 @custom-variant dark (&:is(.dark *));
 

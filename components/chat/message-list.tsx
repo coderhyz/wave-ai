@@ -28,12 +28,17 @@ import {
 import { Button } from "@/components/ui/button"
 import { chatModels } from "@/lib/ai/model"
 
+/**
+ * 一级内存缓存：在 Dashboard 内切换会话再切回来时，可以立即恢复滚动位置。
+ * sessionStorage 是二级缓存，负责页面刷新后的恢复；两级缓存都只保存 scrollTop。
+ */
 const conversationScrollPositions = new Map<string, number>()
 
 const getConversationScrollStorageKey = (chatId: string) =>
   `wave-ai:conversation-scroll:${chatId}`
 
 const readConversationScrollTop = (chatId: string) => {
+  /** 内存读取没有序列化开销，因此优先于 sessionStorage。 */
   const cachedScrollTop = conversationScrollPositions.get(chatId)
   if (cachedScrollTop !== undefined) return cachedScrollTop
 
@@ -49,11 +54,13 @@ const readConversationScrollTop = (chatId: string) => {
     conversationScrollPositions.set(chatId, scrollTop)
     return scrollTop
   } catch {
+    /** 隐私模式或浏览器禁用存储时，直接按“没有历史位置”处理。 */
     return null
   }
 }
 
 const saveConversationScrollTop = (chatId: string, scrollTop: number) => {
+  /** 防止浏览器在回弹或布局变化期间产生负数滚动位置。 */
   const safeScrollTop = Math.max(0, scrollTop)
   conversationScrollPositions.set(chatId, safeScrollTop)
 
@@ -72,6 +79,10 @@ interface ChatMessageMetadata {
   modelId?: string | null
 }
 
+/**
+ * UIMessage.metadata 的公开类型是 unknown，这里先做运行时外形检查，
+ * 避免历史脏数据或不同版本消息导致属性读取报错。
+ */
 const getMessageMetadata = (message?: UIMessage): ChatMessageMetadata => {
   const metadata = message?.metadata
 
@@ -106,7 +117,13 @@ interface ChatMessageProps {
   onRegenerate: (messageId: string) => void
 }
 
-/** 只在消息内容或流式状态变化时重新渲染单条消息。 */
+/**
+ * 单条消息组件。
+ *
+ * 外层 MessageList 在每个流式 token 到达时都会重新执行 messages.map，
+ * memo 可以让没有变化的历史消息跳过 Markdown 和附件的重复渲染，通常只有
+ * 最后一条助手消息会持续更新。
+ */
 const ChatMessage = memo(function ChatMessage({
   message,
   fallbackModelId,
@@ -115,6 +132,10 @@ const ChatMessage = memo(function ChatMessage({
   isStreaming,
   onRegenerate,
 }: ChatMessageProps) {
+  /**
+   * AI SDK 把一条消息表示成多个 part。先按类型拆开，后续区域就只处理
+   * 自己关心的数据，也能借助 TypeScript 类型守卫获得准确的字段类型。
+   */
   const textParts = message.parts.filter(
     (part): part is Extract<UIMessage["parts"][number], { type: "text" }> =>
       part.type === "text"
@@ -135,8 +156,15 @@ const ChatMessage = memo(function ChatMessage({
     ): part is Extract<UIMessage["parts"][number], { type: "reasoning" }> =>
       part.type === "reasoning"
   )
+
+  /** 同一消息可能产生多个 reasoning part，展示时按产生顺序合并。 */
   const reasoningText = reasoningParts.map((part) => part.text).join("\n\n")
   const lastPart = message.parts.at(-1)
+
+  /**
+   * 只有“最后一条、仍在流式生成、当前仍输出 reasoning”的助手消息，
+   * 才让思考组件保持流式状态；历史思考内容不应重新出现动画。
+   */
   const isReasoningStreaming =
     message.role === "assistant" &&
     isLastMessage &&
@@ -145,6 +173,11 @@ const ChatMessage = memo(function ChatMessage({
       reasoningParts.some((part) => part.state === "streaming"))
   const text = textParts.map((part) => part.text).join("\n")
   const metadata = getMessageMetadata(message)
+
+  /**
+   * 新消息直接记录 modelId；部分旧用户消息没有记录模型时，使用紧随其后的
+   * 助手消息模型作为展示兜底，不会修改消息本身。
+   */
   const modelId = metadata.modelId ?? fallbackModelId
   const modelName =
     chatModels.find((model) => model.id === modelId)?.name ??
@@ -159,7 +192,7 @@ const ChatMessage = memo(function ChatMessage({
       toast.error("复制失败")
     }
   }
-  // 下载 Markdown 文档
+  /** 只导出文本 part；附件和 reasoning 不写入 Markdown 文件。 */
   const downloadMarkdown = () => {
     const roleTitle = message.role === "assistant" ? "AI 回复" : "用户消息"
     const markdown = `# ${roleTitle}\n\n${text.trim()}\n`
@@ -187,6 +220,7 @@ const ChatMessage = memo(function ChatMessage({
             : "w-full"
         }
       >
+        {/* 助手 reasoning 独立于最终正文，可折叠并拥有自己的滚动区域。 */}
         {message.role === "assistant" && reasoningText && (
           <Reasoning
             className="w-full rounded-xl border border-border/60 bg-muted/30 px-4 py-3"
@@ -199,6 +233,7 @@ const ChatMessage = memo(function ChatMessage({
           </Reasoning>
         )}
 
+        {/* 图片使用网格预览；原文件地址仍由 ChatAttachment 统一处理。 */}
         {imageParts.length > 0 && (
           <Attachments
             className={message.role === "user" ? "ml-auto" : "ml-0"}
@@ -214,6 +249,7 @@ const ChatMessage = memo(function ChatMessage({
           </Attachments>
         )}
 
+        {/* 非图片附件使用文件列表，避免文档占用大面积消息空间。 */}
         {documentParts.length > 0 && (
           <Attachments className="w-full" variant="list">
             {documentParts.map((part, index) => (
@@ -226,7 +262,10 @@ const ChatMessage = memo(function ChatMessage({
           </Attachments>
         )}
 
-        {/* 消息内容 */}
+        {/*
+         * 助手正文交给 Streamdown 渲染 Markdown；用户正文按纯文本展示，
+         * 避免用户输入被解释成复杂 Markdown，同时保留换行。
+         */}
         {textParts.map((part, index) =>
           message.role === "assistant" ? (
             <MessageResponse key={`${message.id}-${index}`}>
@@ -260,6 +299,7 @@ const ChatMessage = memo(function ChatMessage({
         >
           <Download className="size-4" />
         </MessageAction>
+        {/* 重新生成以用户消息为锚点，因此只显示在用户消息操作栏。 */}
         {message.role === "user" && (
           <MessageAction
             disabled={isGenerating}
@@ -307,12 +347,18 @@ export function MessageList({
   onRetry,
   onRegenerate,
 }: MessageListProps) {
+  /**
+   * useStickToBottom 管理“用户位于底部时跟随新 token、用户上滑后暂停跟随”。
+   * initial:false 避免 Hook 抢先滚动，首次位置由下面的恢复逻辑决定。
+   */
   const conversationScroll = useStickToBottom({
     initial: false,
     resize: "smooth",
   })
   const { scrollRef, scrollToBottom } = conversationScroll
   const isStreaming = status === "streaming"
+
+  /** 请求已经提交但助手消息尚未出现时，显示单独的等待占位。 */
   const isWaitingForAssistant =
     status === "submitted" && messages.at(-1)?.role === "user"
 
@@ -320,6 +366,10 @@ export function MessageList({
     const scrollElement = scrollRef.current
     if (!scrollElement) return
 
+    /**
+     * useLayoutEffect 在浏览器绘制前恢复位置，减少用户看到“先在顶部、再跳动”的闪烁。
+     * 从未访问过的会话直接定位到底部；访问过的会话恢复离开时的位置。
+     */
     const savedScrollTop = readConversationScrollTop(chatId)
     if (savedScrollTop === null) {
       void scrollToBottom({ animation: "instant" })
@@ -327,12 +377,14 @@ export function MessageList({
       scrollElement.scrollTop = savedScrollTop
     }
 
+    /** passive 监听不会阻塞浏览器滚动；当前位置同时写入两级缓存。 */
     const handleScroll = () => {
       saveConversationScrollTop(chatId, scrollElement.scrollTop)
     }
 
     scrollElement.addEventListener("scroll", handleScroll, { passive: true })
 
+    /** 切换会话或卸载前再保存一次，覆盖最后一次尚未触发监听的布局变化。 */
     return () => {
       saveConversationScrollTop(chatId, scrollElement.scrollTop)
       scrollElement.removeEventListener("scroll", handleScroll)
@@ -343,6 +395,10 @@ export function MessageList({
     <Conversation className="min-h-0" instance={conversationScroll}>
       <ConversationContent className="mx-auto w-full max-w-4xl gap-7 px-4 py-8 md:px-8">
         {messages.map((message, index) => {
+          /**
+           * 旧用户消息可能没有 modelId：读取下一条助手消息仅用于底部模型标签。
+           * 正常情况下用户消息后面就是对应的助手回复。
+           */
           const fallbackModelId =
             message.role === "user"
               ? getMessageMetadata(messages[index + 1]).modelId
@@ -361,6 +417,7 @@ export function MessageList({
           )
         })}
 
+        {/* 首个流式消息块到达后，真实助手消息会替换这个等待占位。 */}
         {isWaitingForAssistant && (
           <Message from="assistant">
             <MessageContent className="flex-row items-center gap-2 text-muted-foreground">
@@ -370,6 +427,7 @@ export function MessageList({
           </Message>
         )}
 
+        {/* 错误保留在消息列表底部，重试会复用 useAiChat 的 regenerate 流程。 */}
         {error && (
           <div
             className="flex items-center justify-between gap-3 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive"
@@ -389,7 +447,7 @@ export function MessageList({
           </div>
         )}
       </ConversationContent>
-      {/* 回到底部按钮 */}
+      {/* 用户主动上滑离开底部后，Conversation 才会显示这个快捷按钮。 */}
       <ConversationScrollButton className="bottom-3 border-primary/20 bg-background/90 text-primary shadow-md" />
     </Conversation>
   )

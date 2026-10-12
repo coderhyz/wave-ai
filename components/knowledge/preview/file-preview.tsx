@@ -2,8 +2,7 @@
 
 import { useState } from "react"
 import dynamic from "next/dynamic"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
+import { OriginalMarkdown } from "./original-markdown"
 import { Download, LoaderCircle, RefreshCw, X } from "lucide-react"
 import { useMutation } from "@tanstack/react-query"
 import { toast } from "sonner"
@@ -14,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 
+// 阅读器依赖浏览器 API，且体积较大，只在预览 PDF/DOCX 时加载，避免进入首屏和 SSR。
 const BinaryFilePreview = dynamic(() => import("./binary-file-preview"), {
   ssr: false,
   loading: () => (
@@ -22,35 +22,6 @@ const BinaryFilePreview = dynamic(() => import("./binary-file-preview"), {
     </p>
   ),
 })
-
-/** 不执行原始 HTML，也不加载 Markdown 内的外部追踪图片。 */
-export function OriginalMarkdown({ content }: { content: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      skipHtml
-      components={{
-        a: ({ href, children }) => (
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary underline"
-          >
-            {children}
-          </a>
-        ),
-        img: ({ alt }) => (
-          <span className="text-muted-foreground">
-            [图片未加载{alt ? `：${alt}` : ""}]
-          </span>
-        ),
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  )
-}
 
 /** 统一原件预览；加载和刷新来自 Query，下载复用既有鉴权下载接口。 */
 export function FilePreview({
@@ -62,6 +33,7 @@ export function FilePreview({
   onClose?: () => void
   showFileInfo?: boolean
 }) {
+  // Query 负责鉴权、签名及原件字节；此处不读取解析正文，也不创建第二套加载状态。
   const query = useKnowledgeFilePreview(documentId)
   const file = query.data
   const [imageStatus, setImageStatus] = useState<"loading" | "ready" | "error">(
@@ -97,6 +69,7 @@ export function FilePreview({
           size="sm"
           disabled={query.isFetching}
           onClick={() => {
+            // 刷新会重新获取签名；图片同样重新进入加载状态，不保留过期链接的错误。
             setImageStatus("loading")
             query.refetch()
           }}
@@ -158,6 +131,7 @@ export function FilePreview({
                 </div>
               )}
               {file.kind === "text" && (
+                // TXT 原样展示，不能复用 Markdown 渲染，否则星号、缩进等会改变含义。
                 <pre className="overflow-auto p-5 font-mono text-sm whitespace-pre">
                   {file.text}
                 </pre>

@@ -35,6 +35,7 @@ export function KnowledgeNameDialog({
   maxLength?: number
   submitLabel?: string
 }) {
+  // 默认名称仅用于首次打开；父组件按目标 ID 设置 key，切换目标时重建表单。
   const [name, setName] = useState(defaultName)
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()

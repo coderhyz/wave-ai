@@ -1,5 +1,5 @@
 import Header from "@/app/(routes)/(dashboard)/_common/header"
-import { KnowledgeWorkspace } from "@/components/knowledge/knowledge-workspace"
+import { KnowledgeWorkspace } from "@/components/knowledge/workspace/knowledge-workspace"
 function MainSection() {
   return (
     <div className="h-dvh w-full overflow-hidden pt-13">

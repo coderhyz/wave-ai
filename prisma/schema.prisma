@@ -490,6 +490,7 @@ model KnowledgeDocument {
    */
   chunkedContentRevision Int?
   chunkStatus            DocumentChunkStatus     @default(PENDING)
+  chunkErrorMessage      String?
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   deletedAt              DateTime?
@@ -514,9 +515,12 @@ model DocumentChunk {
   checksum        String
   metadata        Json?
   charCount       Int
+  embedding       Unsupported("vector(1024)")?
+  embeddingModel  String?
   createdAt       DateTime          @default(now())
 
   @@unique([documentId, contentRevision, chunkIndex])
+  @@index([content(ops: raw("gin_trgm_ops"))], type: Gin, map: "document_chunks_content_trgm_idx")
   @@map("document_chunks")
 }
 

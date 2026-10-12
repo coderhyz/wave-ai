@@ -2,7 +2,7 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { withNuqsTestingAdapter } from "nuqs/adapters/testing"
-import { KnowledgeWorkspace } from "@/components/knowledge/knowledge-workspace"
+import { KnowledgeWorkspace } from "@/components/knowledge/workspace/knowledge-workspace"
 import {
   QueryClient,
   QueryObserver,
@@ -28,19 +28,18 @@ import {
   useDeleteKnowledgeFolder,
   useDeleteKnowledgeBase,
 } from "@/hooks/use-knowledge"
-import {
-  FilePreview,
-  OriginalMarkdown,
-} from "@/components/knowledge/file-preview"
+import { FilePreview } from "@/components/knowledge/preview/file-preview"
+import { OriginalMarkdown } from "@/components/knowledge/preview/original-markdown"
 import {
   decodeOriginalText,
   getFilePreviewKind,
 } from "@/lib/knowledge/file-preview"
-import {
-  DocumentPreview,
-  KnowledgeMarkdown,
-  reconcileSavedDraft,
-} from "@/components/knowledge/document-preview"
+import { DocumentPreview } from "@/components/knowledge/document/document-preview"
+import { KnowledgeMarkdown } from "@/components/knowledge/document/knowledge-markdown"
+import { reconcileSavedDraft } from "@/components/knowledge/document/document-editor"
+import { KnowledgeDocumentItem } from "@/components/knowledge/tree/knowledge-document-item"
+import { KnowledgeFolderItem } from "@/components/knowledge/tree/knowledge-folder-item"
+import { KnowledgeUploadToolbar } from "@/components/knowledge/workspace/knowledge-upload-toolbar"
 
 // 捕获 Hook 提交的配置，再交给真实 QueryClient/Mutation 执行，无需新增 DOM 测试依赖。
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
@@ -88,6 +87,122 @@ function mutation() {
   if (!call) throw new Error("Hook did not register a mutation")
   return queryClient.getMutationCache().build(queryClient, call[0])
 }
+
+// 拆分后的子组件不自行请求远端数据；只验证节点展示及父级传入的状态。
+describe("knowledge child components", () => {
+  it("renders a selected failed document without registering request hooks", () => {
+    const html = renderToStaticMarkup(
+      createElement(KnowledgeDocumentItem, {
+        document: {
+          id: documentId,
+          knowledgeBaseId: "base-id",
+          folderId: "folder-id",
+          title: "失败文档",
+          type: "PDF",
+          source: "UPLOAD",
+          status: "FAILED",
+          revision: 1,
+          contentRevision: 0,
+          chunkStatus: "PENDING",
+          createdAt: "2026-10-12T00:00:00Z",
+          updatedAt: "2026-10-12T00:00:00Z",
+        },
+        isSelected: true,
+        onSelect: vi.fn(),
+        onAction: vi.fn(),
+      })
+    )
+    expect(html).toContain('aria-pressed="true"')
+    expect(html).toContain("解析失败")
+    expect(html).toContain('aria-label="失败文档操作"')
+    expect(useQuery).not.toHaveBeenCalled()
+    expect(useMutation).not.toHaveBeenCalled()
+  })
+
+  it("renders folder children without importing the recursive parent", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        KnowledgeFolderItem,
+        {
+          folder: {
+            id: "folder-id",
+            knowledgeBaseId: "base-id",
+            parentId: null,
+            name: "子目录",
+            sortOrder: 0,
+            createdAt: "2026-10-12T00:00:00Z",
+            updatedAt: "2026-10-12T00:00:00Z",
+          },
+          isSelected: true,
+          onSelect: vi.fn(),
+          onAction: vi.fn(),
+        },
+        createElement("span", null, "目录里的文件")
+      )
+    )
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toContain('aria-label="子目录操作"')
+    expect(html).toContain("目录里的文件")
+    expect(useQuery).not.toHaveBeenCalled()
+    expect(useMutation).not.toHaveBeenCalled()
+  })
+
+  it("uses the shared upload state and preserves the upload error", () => {
+    const mutation = useUploadKnowledgeDocument("base-id")
+    const variables = {
+      file: new File(["text"], "note.txt"),
+      folderId: "folder-id",
+    }
+    const upload = {
+      ...mutation,
+      status: "pending",
+      isPending: true,
+      isError: false,
+      isIdle: false,
+      isSuccess: false,
+      error: null,
+      data: undefined,
+      variables,
+    } satisfies ReturnType<typeof useUploadKnowledgeDocument>
+    vi.mocked(useMutation).mockClear()
+    const html = renderToStaticMarkup(
+      createElement(KnowledgeUploadToolbar, {
+        folderId: "folder-id",
+        folderName: "选中目录",
+        upload,
+        treeReady: true,
+        refreshing: false,
+        onRefresh: vi.fn(),
+        onCreateFolder: vi.fn(),
+        onUploaded: vi.fn(),
+      })
+    )
+    expect(html).toContain("上传中")
+    expect(html).toContain("上传到：选中目录")
+    expect(html).toMatch(/aria-label="新建文件夹"[^>]*disabled/)
+    const failedHtml = renderToStaticMarkup(
+      createElement(KnowledgeUploadToolbar, {
+        folderId: "folder-id",
+        folderName: "选中目录",
+        upload: {
+          ...upload,
+          status: "error",
+          isPending: false,
+          isError: true,
+          error: new KnowledgeRequestError("上传失败", 500),
+        },
+        treeReady: true,
+        refreshing: false,
+        onRefresh: vi.fn(),
+        onCreateFolder: vi.fn(),
+        onUploaded: vi.fn(),
+      })
+    )
+    expect(failedHtml).toContain("上传失败")
+    expect(useMutation).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
 
 describe("original file preview", () => {
   const file = {

@@ -7,12 +7,13 @@ export default async function WebLayout({
 }: {
   children: React.ReactNode
 }) {
+  // 查看是否登录
   const session = await auth.api.getSession({
     headers: await headers(), // you need to pass the headers object.
   })
 
   if (session) {
-    return redirect("/home")
+    return redirect("/chat")
   }
 
   return <div>{children}</div>

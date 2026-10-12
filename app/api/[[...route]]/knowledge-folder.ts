@@ -1,3 +1,4 @@
+/** 知识库文件夹接口：负责目录创建、重命名、移动和删除。 */
 import { zValidator } from "@hono/zod-validator"
 import { Hono } from "hono"
 import { getAuthUser } from "@/lib/hono/hono-middware"

@@ -1,3 +1,4 @@
+/** 知识库所有权与文件夹归属校验，统一阻止跨用户、跨知识库访问。 */
 import type { Prisma } from "@/app/generated/prisma"
 import {
   knowledgeBaseNotFound,

@@ -467,9 +467,13 @@ model KnowledgeDocument {
   checksumSha256         String?
   storageKey             String?
   /**
-   * 待解析时可为空；就绪后保存合法的 Tiptap JSON，plainText 由服务端派生。
+   * 旧版富文本字段暂时保留，P1 新文档只写 markdownContent。
    */
   contentJson            Json?
+  /**
+   * 解析器产出的可编辑 Markdown，是展示、分块和后续索引的唯一正文来源。
+   */
+  markdownContent        String?
   plainText              String                  @default("")
   /**
    * revision 跟踪所有可见更新，contentRevision 只跟踪正文更新。

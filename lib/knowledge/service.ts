@@ -1,5 +1,13 @@
+/**
+ * 知识库与文件夹领域服务。
+ * 集中处理所有权校验、目录层级、排序和删除事务，供 API 路由调用。
+ */
 import type { Prisma } from "@/app/generated/prisma"
 import prisma from "@/lib/prisma"
+import {
+  getKnowledgeAssetNames,
+  getKnowledgeAssetStorageKey,
+} from "@/lib/knowledge/assets"
 import {
   knowledgeFolderCycle,
   knowledgeFolderNotEmpty,
@@ -137,28 +145,38 @@ const registerCleanupJobs = async (
     knowledgeBaseId: string
     storageKey: string | null
     checksumSha256: string | null
+    parseMetadata: Prisma.JsonValue | null
   }>,
   reason: "knowledge-base-delete" | "folder-delete"
 ) => {
-  /** 手动文档没有 storageKey，因此不需要创建原文件清理任务。 */
-  const jobs = documents.flatMap((document) =>
-    document.storageKey
-      ? [
-          {
-            knowledgeBaseId: document.knowledgeBaseId,
-            documentId: document.id,
-            type: "CLEANUP" as const,
-            status: "PENDING" as const,
-            dedupeKey: `cleanup:${document.id}:${document.checksumSha256 ?? document.storageKey}`,
-            payload: {
+  const jobs = documents.flatMap((document) => {
+    const storageItems = [
+      ...(document.storageKey
+        ? [
+            {
               storageKey: document.storageKey,
-              documentId: document.id,
-              reason,
-            } satisfies Prisma.InputJsonObject,
-          },
-        ]
-      : []
-  )
+              suffix: document.checksumSha256 ?? document.storageKey,
+            },
+          ]
+        : []),
+      ...getKnowledgeAssetNames(document.parseMetadata).map((assetName) => ({
+        storageKey: getKnowledgeAssetStorageKey(document.id, assetName),
+        suffix: assetName,
+      })),
+    ]
+    return storageItems.map(({ storageKey, suffix }) => ({
+      knowledgeBaseId: document.knowledgeBaseId,
+      documentId: document.id,
+      type: "CLEANUP" as const,
+      status: "PENDING" as const,
+      dedupeKey: `cleanup:${document.id}:${suffix}`,
+      payload: {
+        storageKey,
+        documentId: document.id,
+        reason,
+      } satisfies Prisma.InputJsonObject,
+    }))
+  })
 
   if (jobs.length > 0) {
     /** dedupeKey 配合 skipDuplicates，避免重复删除请求生成相同清理任务。 */
@@ -237,6 +255,7 @@ export const deleteKnowledgeBase = async (
         knowledgeBaseId: true,
         storageKey: true,
         checksumSha256: true,
+        parseMetadata: true,
       },
     })
     const documentIds = documents.map(({ id }) => id)
@@ -434,10 +453,12 @@ export const deleteKnowledgeFolder = async (
         knowledgeBaseId: true,
         storageKey: true,
         checksumSha256: true,
+        parseMetadata: true,
       },
     })
 
-    const childFolderCount = Math.max(0, folderIds.length - 1)
+    // 子树查询始终包含当前目录，扣除它就是后代目录数。
+    const childFolderCount = folderIds.length - 1
 
     /** 非空目录必须由调用方显式确认递归删除，避免一次误操作删除整棵树。 */
     if (!recursive && (childFolderCount > 0 || documents.length > 0)) {

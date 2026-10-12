@@ -12,7 +12,7 @@ export default async function AuthLayout({
   })
 
   if (session) {
-    return redirect("/home")
+    return redirect("/chat")
   }
   return (
     <>

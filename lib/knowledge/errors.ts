@@ -1,8 +1,14 @@
+/**
+ * 知识库模块统一错误定义。
+ * Service 抛出领域错误，API 层在这里把它转换成固定的 HTTP JSON 响应。
+ */
 import { HTTPException } from "hono/http-exception"
+import { KnowledgeParseError } from "@/lib/knowledge/parsers/types"
 
 export type KnowledgeErrorCode =
   | "KNOWLEDGE_BASE_NOT_FOUND"
   | "KNOWLEDGE_FOLDER_NOT_FOUND"
+  | "KNOWLEDGE_DOCUMENT_NOT_FOUND"
   | "KNOWLEDGE_FOLDER_CYCLE"
   | "KNOWLEDGE_FOLDER_NOT_EMPTY"
 
@@ -29,6 +35,10 @@ export const knowledgeBaseNotFound = () =>
 export const knowledgeFolderNotFound = () =>
   new KnowledgeError("KNOWLEDGE_FOLDER_NOT_FOUND", "文件夹不存在", 404)
 
+/** 构造文档不存在、已删除或无权访问时使用的 404 错误。 */
+export const knowledgeDocumentNotFound = () =>
+  new KnowledgeError("KNOWLEDGE_DOCUMENT_NOT_FOUND", "知识库文档不存在", 404)
+
 /** 构造目录移动会形成父子循环时使用的 409 错误。 */
 export const knowledgeFolderCycle = () =>
   new KnowledgeError(
@@ -49,33 +59,6 @@ export const knowledgeFolderNotEmpty = (
     { folderCount, documentCount }
   )
 
-/** 把领域错误转换成统一 JSON；未知异常继续交给全局 500 处理。 */
-export const throwKnowledgeApiError = (error: unknown): never => {
-  /** Hono 已经识别的 HTTP 异常保持原样，避免覆盖认证或参数校验状态码。 */
-  if (error instanceof HTTPException) {
-    throw error
-  }
-
-  if (error instanceof KnowledgeError) {
-    /** 领域错误只向客户端暴露约定好的 code、message 和可选 details。 */
-    throw new HTTPException(error.status, {
-      res: Response.json(
-        {
-          error: {
-            code: error.code,
-            message: error.message,
-            ...(error.details ? { details: error.details } : {}),
-          },
-        },
-        { status: error.status }
-      ),
-    })
-  }
-
-  /** 未知错误不在此处伪装成业务错误，交给主路由的全局 500 处理器。 */
-  throw error
-}
-
 /** 路由共用的错误边界，保持每个 Handler 只描述正常业务流程。 */
 export const runKnowledgeApi = async <T>(
   callback: () => Promise<T>
@@ -83,7 +66,27 @@ export const runKnowledgeApi = async <T>(
   try {
     return await callback()
   } catch (error) {
-    /** 所有知识库 Handler 共用同一套领域错误到 HTTP 响应的转换规则。 */
-    return throwKnowledgeApiError(error)
+    if (
+      error instanceof KnowledgeError ||
+      error instanceof KnowledgeParseError
+    ) {
+      throw new HTTPException(error.status, {
+        res: Response.json(
+          {
+            error: {
+              code: error.code,
+              message: error.message,
+              ...(error instanceof KnowledgeError && error.details
+                ? { details: error.details }
+                : {}),
+            },
+          },
+          { status: error.status }
+        ),
+      })
+    }
+
+    // 认证异常和未知错误原样交给全局处理，保留原有状态码及日志。
+    throw error
   }
 }

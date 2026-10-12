@@ -62,7 +62,7 @@ function SignupForm() {
           name: data.name,
           email: data.email,
           password: data.password,
-          callbackURL: `/home`, // 注册成功后重定向到 /home 页面
+          callbackURL: `/home`, // 注册成功后重定向到 /chat 页面
         },
         {
           onRequest: () => {

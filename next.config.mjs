@@ -5,7 +5,10 @@ const nextConfig = {
     "pdf-parse",
     "@napi-rs/canvas",
     "mammoth",
+    "turndown",
+    "turndown-plugin-gfm",
     "yauzl",
+    "jszip",
     "ali-oss",
   ],
 }

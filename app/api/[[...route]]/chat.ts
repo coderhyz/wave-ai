@@ -45,7 +45,9 @@ import {
 } from "@/lib/chat/persistence"
 import prisma from "@/lib/prisma"
 
+/** 附件路由只接受 UUID，提前拒绝非法路径参数。 */
 const attachmentIdSchema = z.object({ id: z.string().uuid() }).strict()
+/** 上传接口的数据结构；文件字节以 Data URL 字符串形式传入。 */
 const uploadAttachmentSchema = z
   .object({
     url: z.string().max(MAX_ATTACHMENT_BYTES * 2),
@@ -88,6 +90,7 @@ const throwApiError = (error: unknown, fallbackMessage: string): never => {
  * DELETE /:id            删除会话
  */
 export const chatRoute = new Hono()
+  /** 上传附件：鉴权、限制请求体、校验参数后交给 OSS 存储模块。 */
   .post(
     "/attachments",
     getAuthUser,
@@ -95,6 +98,7 @@ export const chatRoute = new Hono()
     zValidator("json", uploadAttachmentSchema),
     async (c) => {
       try {
+        /** getAuthUser 已把登录用户写入 Hono Context。 */
         const user = c.get("user")
         const attachment = await uploadChatAttachment({
           userId: user.id,
@@ -106,6 +110,7 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /** 读取附件：存储层同时校验附件所有权和 OSS 文件完整性。 */
   .get(
     "/attachments/:id",
     getAuthUser,
@@ -118,6 +123,10 @@ export const chatRoute = new Hono()
           user.id,
           id
         )
+        /**
+         * filename 使用 ASCII 兜底，filename* 保留 UTF-8 原始文件名，
+         * 从而兼容不同浏览器对 Content-Disposition 的解析方式。
+         */
         const fallbackName = attachment.filename
           .replace(/[^\x20-\x7e]/g, "_")
           .replace(/["\\]/g, "_")
@@ -125,11 +134,14 @@ export const chatRoute = new Hono()
 
         return new Response(new Uint8Array(content), {
           headers: {
+            /** 附件属于私有数据，仅允许浏览器短时间私有缓存。 */
             "Cache-Control": "private, max-age=300",
             "Content-Disposition": `inline; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
             "Content-Length": String(content.byteLength),
+            /** 禁止附件页面执行脚本或加载其他资源。 */
             "Content-Security-Policy": "default-src 'none'; sandbox",
             "Content-Type": attachment.mediaType,
+            /** 禁止浏览器自行猜测与数据库记录不同的内容类型。 */
             "X-Content-Type-Options": "nosniff",
           },
         })
@@ -138,6 +150,7 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /** 只允许删除尚未绑定到正式消息的临时附件。 */
   .delete(
     "/attachments/:id",
     getAuthUser,
@@ -156,6 +169,9 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /**
+   * 上传前预览文档文字。该接口不持久化文件，只返回 PDF/DOCX 的解析结果。
+   */
   .post(
     "/attachments/preview",
     getAuthUser,
@@ -183,6 +199,7 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /** 发送用户消息，并把模型生成结果转换成 AI SDK UIMessage 流。 */
   .post(
     "/",
     getAuthUser,
@@ -191,6 +208,7 @@ export const chatRoute = new Hono()
     async (c) => {
       try {
         const user = c.get("user")
+        /** 请求已通过 sendChatMessageSchema，下面直接使用经过校验的数据。 */
         const {
           id,
           message: rawMessage,
@@ -199,6 +217,7 @@ export const chatRoute = new Hono()
           trigger,
         } = c.req.valid("json")
 
+        /** 接口保留工具字段，但当前版本不允许客户端启用工具。 */
         if (selectedToolName !== null) {
           throw new HTTPException(400, {
             message: "所选择的工具暂不支持",
@@ -210,6 +229,7 @@ export const chatRoute = new Hono()
           messages: [rawMessage],
         })
 
+        /** 图片输入可能要求视觉模型，因此最终模型不一定等于客户端选择。 */
         const hasImageInput = message.parts.some(
           (part) => part.type === "file" && part.mediaType.startsWith("image/")
         )
@@ -241,11 +261,16 @@ export const chatRoute = new Hono()
         })
         await claimMessageAttachments(user.id, message)
 
+        /** 重新读取数据库历史，保证传给模型的是服务端认可的完整消息链。 */
         let storedMessages = await prisma.message.findMany({
           where: { chatId: id },
           orderBy: { createdAt: "asc" },
         })
 
+        /**
+         * 用户消息已存在通常意味着重试或重新生成，需要区分合法分支操作
+         * 和重复处理同一条历史消息。
+         */
         if (!savedUserMessage.created) {
           const messageIndex = storedMessages.findIndex(
             (storedMessage) => storedMessage.id === message.id
@@ -258,6 +283,7 @@ export const chatRoute = new Hono()
               .map((storedMessage) => storedMessage.id)
 
             if (laterMessageIds.length > 0) {
+              /** 删除旧分支前先收集附件 Key，供数据库删除完成后清理 OSS。 */
               const removedAttachments = await prisma.chatAttachment.findMany({
                 where: { messageId: { in: laterMessageIds }, userId: user.id },
                 select: { storageKey: true },
@@ -280,14 +306,18 @@ export const chatRoute = new Hono()
           }
         }
 
+        /** 数据库存储结构先映射回 UIMessage，再由 AI SDK 做一次语义校验。 */
         const uiMessages = await validateUIMessages<UIMessage>({
           messages: storedMessages.map(toUIMessage),
         })
+        /** 流开始前固定助手消息时间，流式片段和最终入库保持一致。 */
         const assistantCreatedAt = new Date().toISOString()
 
+        /** streamText 负责调用选定模型，并产生服务端流式文本结果。 */
         const result = streamText({
           model: myProvider.languageModel(selectedModelId),
           instructions: CHAT_SYSTEM_PROMPT,
+          /** 附件解析完成后，将 UIMessage 转换成模型供应商需要的消息格式。 */
           messages: await convertToModelMessages(
             await prepareMessagesForModel(uiMessages)
           ),
@@ -299,16 +329,19 @@ export const chatRoute = new Hono()
           },
         })
 
+        /** 将模型流转换成前端 useChat 能直接消费的 UIMessage 数据流。 */
         const uiMessageStream = toUIMessageStream({
           stream: result.stream,
           originalMessages: uiMessages,
           generateMessageId: () => crypto.randomUUID(),
           sendReasoning: true,
           sendSources: true,
+          /** 元数据随助手消息发送给前端，用于展示时间和模型名称。 */
           messageMetadata: () => ({
             createdAt: assistantCreatedAt,
             modelId: selectedModelId,
           }),
+          /** 流正常结束或被用户停止后，把已经生成的助手内容持久化。 */
           onEnd: async ({ responseMessage, isAborted, finishReason }) => {
             try {
               // 中止时 usage 可能失败，仍然保存已经生成的部分回答。
@@ -335,6 +368,7 @@ export const chatRoute = new Hono()
                 completionTokens: usage?.outputTokens ?? null,
               })
 
+              /** 会话记录保存最后实际使用的模型，重新进入时可作为默认选项。 */
               await prisma.chat.updateMany({
                 where: { id, userId: user.id },
                 data: { modelId: selectedModelId },
@@ -350,6 +384,7 @@ export const chatRoute = new Hono()
           },
         })
 
+        /** 返回标准 SSE 响应；consumeStream 确保断开连接后仍正确消费流。 */
         return createUIMessageStreamResponse({
           stream: uiMessageStream,
           consumeSseStream: consumeStream,
@@ -359,6 +394,7 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /** 按置顶状态和更新时间分页获取当前用户的会话列表。 */
   .get(
     "/",
     getAuthUser,
@@ -367,8 +403,10 @@ export const chatRoute = new Hono()
       try {
         const user = c.get("user")
         const { cursor, limit } = c.req.valid("query")
+        /** 多取一条用于判断是否还有下一页，而不额外执行 count 查询。 */
         const chats = await prisma.chat.findMany({
           where: { userId: user.id },
+          /** 置顶会话优先；同级按最近更新排序，id 用于稳定兜底。 */
           orderBy: [
             { isPinned: "desc" },
             { pinnedAt: "desc" },
@@ -376,11 +414,12 @@ export const chatRoute = new Hono()
             { id: "desc" },
           ],
           take: limit + 1,
+          /** 游标存在时跳过游标记录，从下一条开始读取。 */
           ...(cursor
             ? {
-                cursor: { id: cursor },
-                skip: 1,
-              }
+              cursor: { id: cursor },
+              skip: 1,
+            }
             : {}),
           select: {
             id: true,
@@ -396,6 +435,7 @@ export const chatRoute = new Hono()
           },
         })
 
+        /** 第 limit + 1 条不返回，只用来计算 nextCursor。 */
         const hasMore = chats.length > limit
         const items = hasMore ? chats.slice(0, limit) : chats
 
@@ -409,11 +449,13 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /** 获取单个会话及其按时间升序排列的全部消息。 */
   .get("/:id", getAuthUser, zValidator("param", chatIdSchema), async (c) => {
     try {
       const user = c.get("user")
       const { id } = c.req.valid("param")
 
+      /** userId 放进查询条件，避免用户读取其他账号的会话。 */
       const chat = await prisma.chat.findFirst({
         where: { id, userId: user.id },
         include: {
@@ -429,6 +471,7 @@ export const chatRoute = new Hono()
         })
       }
 
+      /** 拆分会话信息和消息，并把数据库消息映射成前端 UIMessage。 */
       const { messages, ...chatData } = chat
 
       return c.json({
@@ -440,6 +483,7 @@ export const chatRoute = new Hono()
       throwApiError(error, "Failed to retrieve chat")
     }
   })
+  /** 修改会话标题或置顶状态，未传入的字段保持不变。 */
   .patch(
     "/:id",
     getAuthUser,
@@ -451,15 +495,17 @@ export const chatRoute = new Hono()
         const { id } = c.req.valid("param")
         const { title, isPinned } = c.req.valid("json")
 
+        /** 使用 updateMany 可以把 id 与 userId 同时作为更新条件。 */
         const result = await prisma.chat.updateMany({
           where: { id, userId: user.id },
           data: {
             ...(title !== undefined ? { title } : {}),
             ...(isPinned !== undefined
               ? {
-                  isPinned,
-                  pinnedAt: isPinned ? new Date() : null,
-                }
+                isPinned,
+                /** 取消置顶时清空时间，重新置顶时记录新的排序时间。 */
+                pinnedAt: isPinned ? new Date() : null,
+              }
               : {}),
           },
         })
@@ -478,10 +524,12 @@ export const chatRoute = new Hono()
       }
     }
   )
+  /** 删除会话；数据库级联删除消息后，再尽力清理对应 OSS 对象。 */
   .delete("/:id", getAuthUser, zValidator("param", chatIdSchema), async (c) => {
     try {
       const user = c.get("user")
       const { id } = c.req.valid("param")
+      /** 会话删除后将无法查询附件，因此必须提前收集 OSS Key。 */
       const attachments = await prisma.chatAttachment.findMany({
         where: {
           userId: user.id,
@@ -490,6 +538,7 @@ export const chatRoute = new Hono()
         select: { storageKey: true },
       })
 
+      /** id 与 userId 联合限制删除范围，避免越权删除。 */
       const result = await prisma.chat.deleteMany({
         where: { id, userId: user.id },
       })
@@ -500,6 +549,7 @@ export const chatRoute = new Hono()
         })
       }
 
+      /** OSS 清理失败只记录日志，不回滚已经完成的数据库删除。 */
       await deleteOssObjectsBestEffort(
         attachments.map(({ storageKey }) => storageKey)
       )

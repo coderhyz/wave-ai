@@ -9,13 +9,13 @@ interface ChatPageProps {
 async function Chat({ searchParams }: ChatPageProps) {
   const params = await searchParams
   // 如果 URL 中有 chatId，则使用它；否则生成一个新的 UUID 作为 chatId。
-  const selectedChatId =
-    typeof params.chatId === "string" ? params.chatId : undefined
+  const selectedChatId = typeof params.chatId === "string" ? params.chatId : undefined
   const chatId = selectedChatId ?? randomUUID()
 
   return (
     <div className="h-dvh w-full overflow-hidden">
       <Header title="对话" />
+      {/* 聊天界面 */}
       <ChatShell chatId={chatId} loadHistory={Boolean(selectedChatId)} />
     </div>
   )

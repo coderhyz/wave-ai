@@ -6,6 +6,7 @@ import { noteRoute } from "./note"
 import { chatRoute } from "./chat"
 import { knowledgeBaseRoute } from "./knowledge-base"
 import { knowledgeFolderRoute } from "./knowledge-folder"
+import { knowledgeDocumentRoute } from "./knowledge-document"
 
 export const runtime = "nodejs"
 
@@ -33,6 +34,7 @@ const routes = app
   .route("/chat", chatRoute)
   .route("/knowledge-bases", knowledgeBaseRoute)
   .route("/knowledge-folders", knowledgeFolderRoute)
+  .route("/knowledge-documents", knowledgeDocumentRoute)
   .get("/", getAuthUser, (c) => {
     return c.json({
       message: "Hello from Wave AI",

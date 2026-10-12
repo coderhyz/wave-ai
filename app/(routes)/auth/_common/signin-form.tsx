@@ -56,7 +56,7 @@ function SignInForm() {
         {
           email: data.email,
           password: data.password,
-          callbackURL: `/home`, // 登录成功后重定向到 /home 页面
+          callbackURL: `/chat`, // 登录成功后重定向到 /chat 页面
         },
         {
           onRequest: () => {
@@ -67,7 +67,7 @@ function SignInForm() {
             // 将获取到的 authToken 存储在全局状态中，以便后续请求使用
             useAuthToken.getState().setBearerToken(authToken)
             // 登录成功后，重定向到 /home 页面
-            router.push("/home")
+            router.push("/chat")
             setIsLoading(false)
           },
           onError: (error) => {

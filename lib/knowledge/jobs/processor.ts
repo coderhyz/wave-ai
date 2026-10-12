@@ -14,6 +14,8 @@ import type {
   Prisma,
 } from "@/app/generated/prisma"
 import prisma from "@/lib/prisma"
+import { registerCleanupJobs } from "@/lib/knowledge/service"
+import { lockOwnedKnowledgeBase } from "@/lib/knowledge/ownership"
 import {
   getKnowledgeAssetNames,
   getKnowledgeAssetStorageKey,
@@ -92,7 +94,8 @@ const claimNextJob = async (): Promise<ClaimedJob | null> => {
   if (claimed.count !== 1) return null
 
   // 领取成功后同步文档状态，前端可以及时显示“解析中”。
-  if (candidate.documentId) {
+  // CLEANUP 不属于解析，不能把仍有效的文档错误地改成 PARSING。
+  if (candidate.documentId && candidate.type !== "CLEANUP") {
     await prisma.knowledgeDocument.updateMany({
       where: { id: candidate.documentId, deletedAt: null },
       data: {
@@ -179,6 +182,8 @@ const processParseJob = async (job: ClaimedJob) => {
     where: { id: job.documentId, deletedAt: null },
     select: {
       id: true,
+      knowledgeBaseId: true,
+      knowledgeBase: { select: { userId: true } },
       type: true,
       originalFileName: true,
       mimeType: true,
@@ -272,54 +277,74 @@ const processParseJob = async (job: ClaimedJob) => {
       MAX_PARSE_TIME_MS
     )
 
-    await prisma.$transaction(async (db) => {
-      // 文档内容、资源清单和任务成功状态必须在同一事务中提交。
-      const updatedDocument = await db.knowledgeDocument.updateMany({
-        where: { id: document.id, deletedAt: null },
-        data: {
-          status: "READY",
-          markdownContent: result.markdown,
-          plainText: result.plainText,
-          revision: { increment: 1 },
-          contentRevision: { increment: 1 },
-          parserVersion: parser.version,
-          parseMetadata: toJson({
-            ...result.metadata,
-            assetNames: uploadedAssetNames,
-            sections: result.sections,
-            warnings: result.warnings,
-          }),
-          parseErrorCode: null,
-          parseErrorMessage: null,
-          parsedAt: new Date(),
-          chunkStatus: "PENDING",
-          chunkedContentRevision: null,
-        },
-      })
-      if (updatedDocument.count !== 1) throw new Error("文档已被删除")
+    await prisma.$transaction(
+      async (db) => {
+        // 与删除共用锁：删除必须读到已提交的新资源清单，不能漏掉刚生成的图片。
+        await lockOwnedKnowledgeBase(
+          db,
+          document.knowledgeBase.userId,
+          document.knowledgeBaseId
+        )
+        // 文档内容、资源清单和任务成功状态必须在同一事务中提交。
+        const updatedDocument = await db.knowledgeDocument.updateMany({
+          where: { id: document.id, deletedAt: null },
+          data: {
+            status: "READY",
+            markdownContent: result.markdown,
+            plainText: result.plainText,
+            revision: { increment: 1 },
+            contentRevision: { increment: 1 },
+            parserVersion: parser.version,
+            parseMetadata: toJson({
+              ...result.metadata,
+              assetNames: uploadedAssetNames,
+              sections: result.sections,
+              warnings: result.warnings,
+            }),
+            parseErrorCode: null,
+            parseErrorMessage: null,
+            parsedAt: new Date(),
+            chunkStatus: "PENDING",
+            chunkedContentRevision: null,
+          },
+        })
+        if (updatedDocument.count !== 1) throw new Error("文档已被删除")
 
-      const updatedJob = await db.documentProcessingJob.updateMany({
-        where: { id: job.id, status: "RUNNING", lockToken: job.lockToken },
-        data: {
-          status: "SUCCEEDED",
-          lockedAt: null,
-          lockedUntil: null,
-          lockToken: null,
-          lastError: null,
-        },
-      })
-      if (updatedJob.count !== 1) throw new Error("文档任务租约已失效")
-    })
+        const updatedJob = await db.documentProcessingJob.updateMany({
+          where: { id: job.id, status: "RUNNING", lockToken: job.lockToken },
+          data: {
+            status: "SUCCEEDED",
+            lockedAt: null,
+            lockedUntil: null,
+            lockToken: null,
+            lastError: null,
+          },
+        })
+        if (updatedJob.count !== 1) throw new Error("文档任务租约已失效")
+        // 与新正文一起登记旧图片清理；OSS 暂时不可用时仍由现有 Worker 重试。
+        await registerCleanupJobs(
+          db,
+          [
+            {
+              ...document,
+              storageKey: null,
+              parseMetadata: {
+                assetNames: previousAssetNames.filter(
+                  (name) => !uploadedAssetNames.includes(name)
+                ),
+              },
+            },
+          ],
+          "reparse"
+        )
+      },
+      { isolationLevel: "ReadCommitted", maxWait: 5_000, timeout: 10_000 }
+    )
   } catch (error) {
     // 事务失败时，新资源尚未被文档正式引用，需要主动回收。
     await deleteAssetsBestEffort(uploadedAssetNames)
     throw error
   }
-
-  // 新版本生效后删除上一版不再使用的解析资源。
-  await deleteAssetsBestEffort(
-    previousAssetNames.filter((name) => !uploadedAssetNames.includes(name))
-  )
 }
 
 const classifyFailure = (error: unknown) => {
@@ -364,7 +389,7 @@ const failOrRetryJob = async (job: ClaimedJob, error: unknown) => {
     })
     if (updatedJob.count !== 1) return
 
-    if (job.documentId) {
+    if (job.documentId && job.type !== "CLEANUP") {
       // 等待重试时文档回到 QUEUED；重试耗尽后才进入 FAILED。
       await db.knowledgeDocument.updateMany({
         where: { id: job.documentId, deletedAt: null },

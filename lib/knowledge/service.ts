@@ -11,6 +11,7 @@ import {
 import {
   knowledgeFolderCycle,
   knowledgeFolderNotEmpty,
+  knowledgeDocumentNotFound,
 } from "@/lib/knowledge/errors"
 import {
   lockOwnedKnowledgeBase,
@@ -112,7 +113,7 @@ const getFolderSubtreeIds = async (
 }
 
 /** 删除文档前取消尚未结束的解析、重解析和分块任务。 */
-const cancelDocumentJobs = async (
+export const cancelDocumentJobs = async (
   db: KnowledgeTransaction,
   documentIds: string[]
 ) => {
@@ -135,10 +136,10 @@ const cancelDocumentJobs = async (
 }
 
 /**
- * 为带原文件的文档登记清理任务。
+ * 为原件及解析图片登记清理任务；重解析时可以只传入旧图片清单。
  * payload 独立保存 storageKey，后续即使文档被物理删除，Worker 仍能清理文件。
  */
-const registerCleanupJobs = async (
+export const registerCleanupJobs = async (
   db: KnowledgeTransaction,
   documents: Array<{
     id: string
@@ -147,7 +148,11 @@ const registerCleanupJobs = async (
     checksumSha256: string | null
     parseMetadata: Prisma.JsonValue | null
   }>,
-  reason: "knowledge-base-delete" | "folder-delete"
+  reason:
+    | "knowledge-base-delete"
+    | "folder-delete"
+    | "document-delete"
+    | "reparse"
 ) => {
   const jobs = documents.flatMap((document) => {
     const storageItems = [
@@ -186,6 +191,42 @@ const registerCleanupJobs = async (
     })
   }
 }
+
+/** 单文档删除复用整库/目录删除的事务与清理任务，不在 HTTP 请求内直接删除 OSS。 */
+export const deleteKnowledgeDocument = async (userId: string, id: string) =>
+  prisma.$transaction(async (db) => {
+    const where = {
+      id,
+      deletedAt: null,
+      knowledgeBase: { userId, deletedAt: null },
+    }
+    const initial = await db.knowledgeDocument.findFirst({
+      where,
+      select: { knowledgeBaseId: true },
+    })
+    if (!initial) throw knowledgeDocumentNotFound()
+    await lockOwnedKnowledgeBase(db, userId, initial.knowledgeBaseId)
+    // 等锁期间可能被目录删除；拿到锁后再读取资源清单。
+    const document = await db.knowledgeDocument.findFirst({
+      where,
+      select: {
+        id: true,
+        knowledgeBaseId: true,
+        storageKey: true,
+        checksumSha256: true,
+        parseMetadata: true,
+      },
+    })
+    if (!document) throw knowledgeDocumentNotFound()
+    await cancelDocumentJobs(db, [id])
+    await registerCleanupJobs(db, [document], "document-delete")
+    const deletedAt = new Date()
+    await db.knowledgeDocument.update({
+      where: { id },
+      data: { deletedAt, revision: { increment: 1 } },
+    })
+    return { id, knowledgeBaseId: document.knowledgeBaseId, deletedAt }
+  }, organizationTransactionOptions)
 
 /** 查询当前用户所有未删除的知识库，并附带有效目录数和文档数。 */
 export const listKnowledgeBases = async (userId: string) =>
@@ -287,6 +328,7 @@ export const deleteKnowledgeBase = async (
       deletedAt,
       folderCount: folderResult.count,
       documentCount: documentResult.count,
+      documentIds,
     }
   }, organizationTransactionOptions)
 
@@ -487,5 +529,7 @@ export const deleteKnowledgeFolder = async (
       deletedAt,
       folderCount: folderResult.count,
       documentCount: documentResult.count,
+      folderIds,
+      documentIds,
     }
   }, organizationTransactionOptions)

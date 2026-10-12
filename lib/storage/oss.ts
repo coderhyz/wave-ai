@@ -48,3 +48,17 @@ export const getOssObject = async (storageKey: string): Promise<Buffer> => {
 export const deleteOssObject = async (storageKey: string) => {
   await getOssClient().delete(storageKey)
 }
+
+/** 使用现有客户端签发只读 URL；不签入 Range，允许 PDF 阅读器自行请求字节范围。 */
+export const getOssPreviewUrl = (storageKey: string, expires: number) =>
+  getOssClient().signatureUrlV4(
+    "GET",
+    expires,
+    {
+      queries: {
+        "response-content-disposition": "inline",
+        "response-cache-control": "private, no-store",
+      },
+    },
+    storageKey
+  )

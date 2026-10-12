@@ -1,386 +1,305 @@
 # Wave AI 对话模块开发大纲
 
-## 目标与源码基线
+> 更新日期：2026-10-12。源码基线：Git 0d2e921 及当前工作区。
+> 本文区分已实现功能与待验收内容；以本地源码和 package.json 为准，遵循 AGENTS.md。
 
-- 项目用途：在现有 Next.js 仪表盘内完成一个支持登录用户、模型切换、流式回复、会话历史和消息持久化的 AI 对话模块。
-- 本次目标：先做出可稳定使用的文本对话 MVP，再扩展工具调用、附件、搜索和断线续传。
-- 源码基线：Git `ef9c30d`，并包含当前工作区尚未提交的聊天、笔记、布局和依赖改动。
-- 已覆盖范围：Prisma 数据模型、Hono API、AI SDK 5 流式调用、客户端 hooks、组件边界、页面路由、UI 状态和验收顺序。
-- 暂不覆盖：RAG、向量数据库、语音、多模态文件解析、计费系统、跨设备流恢复。这些应在文本对话闭环稳定后增加。
+## 目标与当前状态
 
-## 当前状态与必须先处理的问题
+Wave AI 已具备登录用户的聊天页面、模型选择、流式回复、会话历史、消息持久化和 OSS 附件处理。当前使用 AI SDK 7，聊天已经进入功能验收与维护阶段。
 
-当前项目已经具备 Better Auth、Prisma、Hono RPC、TanStack Query、Zustand、AI SDK 5、模型注册和基础布局。聊天模块目前处于“后端半成品、前端占位页”状态：
+项目下一批开发重点是知识库 P2：上传、文件树、解析状态和 Markdown 阅读，再补编辑保存。详细计划见 [知识库大纲](KNOWLEDGE_FILE_MARKDOWN_OUTLINE.md)。
 
-1. `app/(routes)/(dashboard)/chat/page.tsx` 只显示 `Chat content`。
-2. `app/api/[[...route]]/chat.ts` 已能识别用户、创建 Chat、读取 Message，但还没有保存用户消息、调用 `streamText`、返回流、保存助手消息。
-3. 历史消息使用 `createdAt: "desc"` 读取后直接追加新消息，顺序会倒置，应改成 `asc`。
-4. Chat 查询只按 `id`，没有同时限制 `userId`，存在越权读取或写入其他用户会话的风险。
-5. `z.custom<UIMessage>()` 和类型断言只影响 TypeScript，不做运行时校验；模型 ID 也需要白名单校验。
-6. Prisma schema 使用 `Message.parts`，已有迁移却创建了 `messages.part`。必须新增迁移对齐字段，不能假设数据库已经与 schema 一致。
-7. `lib/ai/provider.ts` 会无条件用 DeepSeek provider 覆盖 `DEVELOPMENT_CHAT_MODEL`，需要确认这是否符合生产环境预期。
-8. 首条消息先同步生成标题会延迟首个 token。MVP 可先使用消息截断标题，再在回复结束后异步更新 AI 标题。
+| 能力 | 实现状态 | 源码位置 |
+| --- | --- | --- |
+| 登录态与所有权 | 已有中间件及用户范围查询 | lib/hono/hono-middware.ts、lib/chat/persistence.ts |
+| 流式对话与落库 | 已有用户消息保存、模型流和助手消息保存 | app/api/[[...route]]/chat.ts |
+| 聊天页面 | 已有 ChatShell、输入区和消息列表 | app/(routes)/(dashboard)/chat/page.tsx、components/chat/ |
+| 会话管理 | 列表、详情、改名、置顶和删除已实现 | hooks/use-chat-list.ts、components/sidebar/nav-chats.tsx |
+| 模型选择 | 白名单、图片模型选择和生成预算已配置 | lib/ai/model.ts、provider.ts、generation-settings.ts |
+| Markdown 与推理展示 | 已有 Streamdown、按需插件和折叠推理区 | components/chat/message-list.tsx、components/ai-elements/ |
+| 附件 | 已有上传、预览、站内读取及模型输入准备 | lib/chat-attachment-storage.ts、lib/chat-attachment-preparer.ts |
+| 工具与 RAG | 尚未实现；非空 selectedToolName 会被拒绝 | chat.ts、知识库后续阶段 |
 
-## 目标架构
+上述状态说明代码存在，不代表真实模型请求、双用户隔离和所有浏览器交互已经验收。
+
+## 现有架构与处理流程
 
 ```mermaid
 flowchart LR
-    A[ChatComposer] --> B[useChatController]
-    B --> C[AI SDK DefaultChatTransport]
+    A[ChatComposer] --> B[useAiChat]
+    B --> C[DefaultChatTransport]
     C --> D[POST /api/chat]
-    D --> E[Better Auth 鉴权]
-    E --> F[创建或校验 Chat 所有权]
-    F --> G[保存用户消息]
-    G --> H[读取升序历史]
-    H --> I[convertToModelMessages]
-    I --> J[streamText + 模型 Provider]
-    J --> K[SSE/UI Message Stream]
-    K --> L[MessageList 增量渲染]
-    J --> M[onFinish 保存助手消息]
-    M --> N[更新会话标题和 updatedAt]
-    N --> O[刷新会话历史]
+    D --> E[鉴权与消息校验]
+    E --> F[附件准备和会话所有权]
+    F --> G[幂等保存用户消息]
+    G --> H[读取升序历史并转换模型消息]
+    H --> I[streamText]
+    I --> J[toUIMessageStream 与 SSE]
+    J --> K[MessageList]
+    J --> L[onEnd 保存助手消息及更新会话]
+    K --> M[完成后刷新查询缓存]
 ```
 
-## 推荐目录结构
+- 页面使用 /chat；已有会话通过 /chat?chatId=UUID 打开，没有独立 /chat/[id] 路由。
+- 新会话由页面生成 UUID，首次发送时创建数据库记录。
+- 会话初始标题来自首条消息的截断文本，没有已实现的异步 AI 标题流程。
+- 模型历史由服务端读取，客户端发送本轮用户消息和选择项。
+- 重新生成时，服务端删除目标用户消息之后的旧分支，并清理相关附件。
+- 外部 Chat 实例使同一页面会话中的路由切换可以继续订阅生成；这不是跨设备或整页刷新后的流恢复。
+
+## 当前目录与模块职责
 
 ```text
-app/
-  (routes)/(dashboard)/chat/
-    page.tsx                    # 新会话入口，生成 id 后跳转
-    [id]/page.tsx               # 会话页面，加载初始消息
-  api/[[...route]]/
-    chat.ts                     # 聊天流、列表、详情、改名、删除
+app/(routes)/(dashboard)/chat/page.tsx
+app/api/[[...route]]/chat.ts
+app/api/[[...route]]/route.ts
+
 components/chat/
-  chat-shell.tsx                # 对话页布局和状态编排
-  chat-header.tsx               # 标题、模型选择、历史入口
-  chat-empty.tsx                # 空会话欢迎区和建议问题
-  message-list.tsx              # 消息列表、自动滚动
-  message-item.tsx              # 用户/助手消息容器
-  message-parts.tsx             # text/reasoning/source/tool/file 分片渲染
-  chat-composer.tsx             # 输入框、发送、停止、重试
-  model-selector.tsx            # 模型选择
-  tool-selector.tsx             # 工具选择，第二阶段启用
-  chat-history.tsx              # 历史列表或 Sheet
-  chat-history-item.tsx         # 打开、改名、删除
-  chat-error.tsx                # 可恢复错误提示
+  chat-shell.tsx                 # 历史加载、模型、草稿和界面编排
+  chat-composer.tsx              # 输入、模型、附件、发送与停止
+  message-list.tsx               # 文本、推理、附件、消息操作和虚拟列表
+  attachment-preview.tsx
+  model-brand-icon.tsx
+components/sidebar/
+  nav-chats.tsx
+  chat-sidebar-item.tsx
+components/ai-elements/
+  message.tsx                   # Streamdown 渲染
+  use-streamdown-plugins.ts      # 代码、公式、Mermaid 按需加载
+  conversation.tsx              # 滚动与回到底部
+
 hooks/
-  use-ai-chat.ts                # 封装 useChat 和 transport
-  use-chat-history.ts           # 会话列表查询和改名/删除 mutation
-  use-chat-scroll.ts            # 自动滚动与“回到底部”
-  use-chat-preferences.ts       # 模型和工具偏好，可持久化
+  use-ai-chat.ts
+  use-chat-list.ts
+stores/chat-ui-store.ts          # 草稿、模型、滚动位置与 sessionStorage
 lib/chat/
-  schemas.ts                    # 请求和消息 metadata 的 Zod schema
-  queries.ts                    # 服务端所有权查询、消息查询
-  persistence.ts                # 幂等保存用户/助手消息
-  mapper.ts                     # Prisma Message 与 UIMessage 互转
+  schemas.ts
+  persistence.ts
+  mapper.ts
+  model-attachments.ts
+  attachment-preview.ts
+  normalize-markdown-math.ts
+lib/chat-attachment-storage.ts
+lib/chat-attachment-preparer.ts
+lib/storage/oss.ts
 lib/ai/
-  model.ts                      # 模型目录与运行时白名单
-  provider.ts                   # 模型实例注册
-  prompts.ts                    # 系统提示词与标题提示词
+  model.ts
+  provider.ts
+  generation-settings.ts
+  prompts.ts
 ```
 
-## Prisma 数据设计
+不为符合旧架构图额外拆出 message-parts、chat-history、chat-error 或多个滚动/偏好 Hook。沿用当前职责划分。
 
-MVP 推荐保留 AI SDK 的 `parts` JSON 作为消息正文，因为它能统一存储文本、推理、来源、文件和工具调用。检索、计费等明确需要查询的字段再单独成列。
+## 数据模型与安全约束
 
-```prisma
-model Chat {
-  id            String    @id @default(uuid())
-  title         String    @default("新对话")
-  modelId       String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  userId        String
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages      Message[]
+以 prisma/schema.prisma 为准：
 
-  @@index([userId, updatedAt(sort: Desc)])
-  @@map("chats")
-}
+- Chat 保存 userId、title、modelId、isPinned、pinnedAt 及时间字段。
+- Message 使用 parts JSON，保存 metadata、模型、完成原因和可用的 Token 用量。
+- 消息按 createdAt 升序读取，消息 ID 用于幂等插入及冲突检查。
+- ChatAttachment 保存用户、OSS 对象键、文件类型、大小、哈希和可选提取文本；发送成功后关联消息。
+- 查询、修改、删除已有会话均限制当前用户范围。
+- PDF/DOCX 聊天附件的文字提取与知识库 MinerU 解析是两条不同流程。
 
-model Message {
-  id               String   @id
-  role             Role
-  parts            Json
-  metadata         Json?
-  modelId          String?
-  finishReason     String?
-  promptTokens     Int?
-  completionTokens Int?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  chatId           String
-  chat             Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+20260923172552_align_chat_message_schema 已提供 part/parts 对齐和相关字段迁移，20260923122414_add_chat_pinning 已提供置顶迁移，20261010123000_add_chat_attachments 已提供附件迁移。上线或新环境仍需核实迁移实际执行情况。
 
-  @@index([chatId, createdAt])
-  @@map("messages")
-}
-```
+令牌用量缺失时保持空值，中止时允许保存已生成的部分回答。所有权和消息冲突错误保留明确的 HTTP 状态。
 
-实施规则：
+## 已有 API 合约
 
-- 新增迁移把数据库中的 `part` 改为 `parts`，然后重新生成 Prisma Client。
-- Chat 列表只返回当前用户的数据，按 `updatedAt desc` 分页。
-- Message 按 `createdAt asc` 返回。
-- 客户端生成的用户消息 ID 直接作为主键，用 `upsert` 或“存在则跳过”实现重试幂等。
-- 助手消息 ID 由服务端 `generateMessageId` 生成，并在 `onFinish` 中保存。
-- 所有 Chat 的读、写、删除必须同时校验 `id` 和 `userId`。
-- 令牌用量属于第二优先级；当前 provider 无法稳定返回时保留空值，不伪造数据。
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| POST | /api/chat | 发送消息，返回 UIMessage SSE |
+| GET | /api/chat | 游标分页列表，返回 items 和 nextCursor |
+| GET | /api/chat/:id | 会话信息与升序消息 |
+| PATCH | /api/chat/:id | 修改 title 或 isPinned |
+| DELETE | /api/chat/:id | 删除会话及消息，清理附件 |
+| POST | /api/chat/attachments | 上传附件到私有 OSS |
+| GET | /api/chat/attachments/:id | 鉴权读取附件 |
+| DELETE | /api/chat/attachments/:id | 删除尚未认领的临时附件 |
+| POST | /api/chat/attachments/preview | 提取 PDF/DOCX 文字，不持久化文件 |
 
-## API 合约
-
-| 方法 | 路径 | 作用 | 核心返回 |
-| --- | --- | --- | --- |
-| `POST` | `/api/chat` | 提交消息并返回 UI message stream | SSE 流 |
-| `GET` | `/api/chat` | 分页读取当前用户会话 | `items + nextCursor` |
-| `GET` | `/api/chat/:id` | 读取会话和升序消息 | `chat + messages` |
-| `PATCH` | `/api/chat/:id` | 修改标题或归档状态 | 更新后的 chat |
-| `DELETE` | `/api/chat/:id` | 删除当前用户会话 | `{ success: true }` |
-
-`POST /api/chat` 建议请求体：
+POST /api/chat 的核心请求字段：
 
 ```ts
 {
-  id: string;
-  message: UIMessage;
-  selectedModelId: ChatModelId;
-  selectedToolName: ToolName | null;
-  trigger: "submit-message" | "regenerate-message";
+  id: string
+  message: UIMessage
+  selectedModelId: ChatModelId
+  selectedToolName: string | null
+  trigger: "submit-message" | "regenerate-message"
 }
 ```
 
-服务端处理顺序固定为：
+当前 selectedToolName 必须为 null。请求先经 Zod 校验，再由 AI SDK 校验 UIMessage 的语义。模型必须属于项目白名单，图片消息按配置选择视觉模型。
 
-1. Zod 校验基本结构，再使用 AI SDK 的消息校验能力检查 parts。
-2. 从会话读取用户身份，不接受客户端传入 `userId`。
-3. 查询 `Chat` 所有权；不存在则为当前用户创建，存在但不属于当前用户则统一返回 404。
-4. 校验 `selectedModelId` 是否在服务端模型白名单内。
-5. 幂等保存本轮用户消息。
-6. 按时间升序读取完整历史，并映射为 `UIMessage[]`。
-7. `convertToModelMessages(messages)` 后调用 `streamText`。
-8. 用 `toUIMessageStreamResponse({ originalMessages, generateMessageId, onFinish })` 返回流。
-9. `onFinish` 保存 `responseMessage`，更新 Chat 时间与标题。
-10. `onError` 只返回用户可理解的信息，服务端记录原始错误；不得把密钥或 provider 原始响应暴露给浏览器。
+实际流 API 为 streamText -> toUIMessageStream -> createUIMessageStreamResponse。助手消息在服务端 onEnd 中保存；客户端 onFinish 负责刷新查询和清理实例缓存，两者不是同一个回调。
 
-## Hook 设计
+## Hook、状态与界面
 
-### `useAiChat`
+### useAiChat
 
-唯一负责实时对话状态，不再用 Zustand 复制一份 messages。
+- 通过已有 DefaultChatTransport 发送最后一条用户消息和当前模型/工具参数。
+- 先上传附件至 OSS，再发送稳定的站内文件地址；失败时尝试回收临时附件。
+- Chat/useChat 管理 messages、status、error、发送、停止和重新生成。
+- 当前生成实例保存在页面级 Map 中，以支持仪表盘内切换页面继续生成。
+- 完成或错误时刷新会话列表和详情；普通空闲实例在卸载后清理。
 
-- 输入：`chatId`、`initialMessages`、`selectedModelId`、`selectedToolName`。
-- 内部：`useChat({ id, messages, transport: new DefaultChatTransport(...) })`。
-- transport 的 `prepareSendMessagesRequest` 只发送最后一条用户消息和当前选择项。
-- 输出：`messages`、`status`、`error`、`sendText`、`regenerate`、`stop`、`clearError`。
-- `sendText` 负责 trim、空值拦截和调用 `sendMessage({ text })`。
-- `onFinish` 只负责刷新 React Query 的会话列表；消息落库以服务端 `onFinish` 为准。
+### 会话查询与 UI 状态
 
-### `useChatHistory`
+- useChatList 使用 useQuery，默认请求最近 50 条；后端虽支持 cursor，前端尚未接入无限翻页。
+- useChatDetail 查询详情；useUpdateChat 与 useDeleteChat 刷新或移除相关缓存。
+- useChatUiStore 按 chatId 保存草稿、模型和滚动位置，使用 sessionStorage，退出时清理。
+- Zustand 不维护第二份消息正文；远端数据沿用 TanStack Query。
 
-- `useInfiniteQuery` 加载会话列表，query key 为 `['chats']`。
-- `useRenameChat` 成功后同时更新列表缓存和详情缓存。
-- `useDeleteChat` 先做乐观移除，失败回滚；若删除的是当前会话则跳到 `/chat`。
+### 消息渲染与交互
 
-### `useChatPreferences`
+- MessageList 处理文本、推理和附件，助手正文使用 Streamdown。
+- 已有代码、数学公式、Mermaid 和中文插件能力，部分插件按内容加载。
+- 已有复制、重新生成、Markdown 下载及消息列表虚拟化代码。
+- Conversation 与列表处理滚动、回到底部和滚动位置恢复。
+- ChatComposer 处理附件、模型选择、发送及停止；工具选择尚未启用。
+- 空状态建议问题用于填入输入框，当前不是自动发送。
 
-- Zustand `persist` 只保存 `selectedModelId`、`selectedToolName` 和 UI 偏好。
-- 从持久化状态恢复时再次与服务端模型列表对照，过期模型回退到默认值。
+## 课程 01：理解数据与安全边界
 
-### `useChatScroll`
+状态：实现已具备；本节保留为源码阅读大纲，真实数据库和双用户验收待确认。
 
-- 用户位于底部附近时，流式 token 到达后自动滚动。
-- 用户主动向上阅读时停止抢滚动，并显示“回到底部”按钮。
-- 新发送消息后强制滚到底部一次。
+主链：迁移 -> Prisma 模型 -> 登录中间件 -> 会话归属 -> 用户范围查询。
 
-## 组件与 UI 设计
+阅读顺序：
 
-### 页面布局
+1. prisma/schema.prisma：Chat、Message、ChatAttachment。
+2. prisma/migrations/20260923172552_align_chat_message_schema/migration.sql：字段对齐。
+3. lib/hono/hono-middware.ts：getAuthUser。
+4. lib/chat/persistence.ts：getOrCreateOwnedChat、ChatOwnershipError。
+5. app/api/[[...route]]/chat.ts：GET/PATCH/DELETE 的用户条件。
 
-- 页面使用 `h-dvh`/可用高度的纵向 flex，避免整个浏览器跟着消息列表滚动。
-- 顶部 `ChatHeader` 固定，显示会话标题、模型选择和历史入口。
-- 中间 `MessageList` 独立滚动，内容最大宽度建议 `max-w-3xl`。
-- 底部 `ChatComposer` 粘在内容区底部，并保留移动端安全区。
+理解问题：消息 ID、会话 ID 和登录用户之间的归属关系如何保证？
 
-### 空状态
+## 课程 02：模型选择与请求校验
 
-- 显示产品名、一句引导语和 3–4 个建议问题。
-- 点击建议问题只填入或直接发送，行为保持一致并明确。
-- 没有消息时不渲染空白的 MessageList。
+状态：实现已具备；实际供应商调用与预算效果待联调。
 
-### 消息渲染
+主链：模型选择 -> sendChatMessageSchema -> resolveChatModelId -> myProvider -> 生成配置。
 
-- 用户消息靠右并使用轻量强调背景；助手消息占更宽内容区。
-- `MessageParts` 按 `part.type` 分派：`text`、`reasoning`、`source-url`、`source-document`、`file`、`tool-*`。
-- MVP 先支持 text；未知 part 显示安全占位，避免整条消息崩溃。
-- Markdown、代码高亮和表格可作为第二阶段依赖；在未安装渲染库前使用 `whitespace-pre-wrap`。
-- 助手消息完成后显示复制、重新生成按钮；流式中显示轻量状态，不使用持续闪烁的大面积骨架屏。
+阅读顺序：
 
-### 输入区
+1. lib/ai/model.ts：CHAT_MODEL_IDS、chatModels、resolveChatModelId。
+2. lib/chat/schemas.ts：sendChatMessageSchema。
+3. lib/ai/provider.ts：myProvider、getChatGenerationSettings。
+4. lib/ai/generation-settings.ts：getModelGenerationSettings。
+5. components/chat/chat-shell.tsx：图片输入时的模型选择。
 
-- 使用已有 `AutosizeTextarea`，Enter 发送，Shift+Enter 换行。
-- `submitted` 状态禁用重复提交；`streaming` 状态把发送按钮切换为停止按钮。
-- 支持粘贴长文本，设置合理最大高度后内部滚动。
-- 模型选择器靠近输入框；工具选择器先隐藏或标为实验功能，直到后端真实实现。
-- 错误提示放在输入框上方，可重试并保留原输入。
+理解问题：为什么服务端还需要决定实际执行模型？仅核查环境变量是否配置，不读取或传播密钥值。
 
-### 历史记录
+## 课程 03：一次完整流式对话
 
-- 桌面端可放在侧栏分组，移动端使用 Sheet。
-- 每项显示标题和更新时间，当前会话有选中态。
-- 菜单提供改名和删除；删除必须有确认对话框。
-- 列表使用 cursor 分页，避免消息增长后一次性加载所有会话。
+状态：实现已具备；真实流式交互待验收。
 
-### 可访问性与响应式
+主链：输入 -> sendText -> transport -> POST -> streamText -> SSE -> MessageList。
 
-- 消息流容器使用 `aria-live="polite"`，按钮提供可读 label。
-- 键盘可完成发送、停止、选择模型、打开历史和关闭弹层。
-- 移动端不依赖 hover；触控目标至少保持按钮默认尺寸。
-- 深浅色继续使用现有 CSS token，不在聊天组件内写死颜色。
+阅读顺序：
 
-## 课程 01：先修正数据与安全边界
+1. components/chat/chat-composer.tsx：提交事件。
+2. hooks/use-ai-chat.ts：sendText、chatTransport。
+3. app/api/[[...route]]/route.ts：chatRoute 挂载。
+4. app/api/[[...route]]/chat.ts：POST、streamText、toUIMessageStream。
+5. components/chat/message-list.tsx：正文及推理渲染。
 
-读完能回答：一条消息在数据库中怎样被可靠归属到当前用户？
+理解问题：客户端发送本轮消息后，完整模型历史来自哪里？
 
-主链：迁移触发 → `schema.prisma` → 修正字段与索引 → `prisma migrate dev` → Prisma Client 与数据库一致。
+## 课程 04：持久化、幂等与重新生成
 
-必读顺序：
+状态：实现已具备；数据库故障、重试和中止的端到端验收待确认。
 
-1. `prisma/schema.prisma` 的 `Chat`、`Message`：输入是业务持久化要求，输出是模型和索引定义。
-2. `prisma/migrations/20260525133128_init/migration.sql` 的 `messages`：输入是既有数据库结构，输出是 `part`/`parts` 差异证据。
-3. `lib/prisma.ts` 的 Prisma 实例：输入是 schema 生成客户端，输出是 API 可复用的数据访问对象。
-4. `lib/hono/hono-middware.ts` 的 `getAuthUser`：输入是请求 cookie/header，输出是可信 `user` 上下文。
+主链：保存用户消息 -> 读取历史 -> 处理旧分支 -> 模型生成 -> onEnd 保存助手消息。
 
-选读证据：`lib/auth.ts`。暂缓阅读：笔记 CRUD，它只用于参考 hook/API 风格。状态：`大纲`。
+阅读顺序：
 
-## 课程 02：建立模型选择与服务端校验
+1. lib/chat/persistence.ts：saveMessageOnce、MessageConflictError。
+2. lib/chat/mapper.ts：toUIMessage。
+3. app/api/[[...route]]/chat.ts：savedUserMessage、regenerate-message 分支及 onEnd。
+4. lib/chat-attachment-storage.ts：附件认领及旧分支清理。
 
-读完能回答：用户选择模型后，服务端怎样保证只能调用已允许的模型？
+理解问题：重复消息与合法重新生成如何区分？中止时保存什么内容？
 
-主链：选择模型 → 请求体 modelId → Zod 白名单 → provider registry → language model 实例。
+## 课程 05：页面、组件与状态归属
 
-必读顺序：
+状态：聊天页面已实现；可访问性及移动端交互待验收。
 
-1. `lib/ai/model.ts` 的 `chatModels`、`DEFAULT_MODEL_ID`：输入是可用模型配置，输出是 UI 选项与白名单。
-2. `lib/ai/provider.ts` 的 `createLanguageModels`、`myProvider`：输入是模型 ID，输出是 provider 对应实例。
-3. `app/api/[[...route]]/chat.ts` 的 `chatSchema`：输入是浏览器请求，输出是可信参数。
+主链：/chat?chatId=UUID -> useChatDetail -> ChatShell -> useAiChat -> 输入区和消息列表。
 
-选读证据：`.env` 的 key 名称，只检查是否配置，不读取或传播值。暂缓阅读：工具选择，因为当前没有工具实现。状态：`大纲`。
+阅读顺序：
 
-## 课程 03：打通一次完整流式对话
+1. app/(routes)/(dashboard)/chat/page.tsx：searchParams 和会话 ID。
+2. components/chat/chat-shell.tsx：历史初始化、草稿和模型。
+3. hooks/use-ai-chat.ts：Chat 实例与 useChat 订阅。
+4. components/chat/message-list.tsx、chat-composer.tsx。
+5. stores/chat-ui-store.ts：草稿与滚动位置。
 
-读完能回答：从点击发送到助手逐字显示，中间发生了什么？
+理解问题：流、消息、草稿、查询缓存分别由谁管理？
 
-主链：提交文本 → `useAiChat.sendText` → `DefaultChatTransport` → Hono POST → `streamText` → UI message stream → `MessageList`。
+## 课程 06：会话历史管理
 
-必读顺序：
+状态：基本管理已实现；前端连续分页尚未接入。
 
-1. `hooks/use-ai-chat.ts` 的 `useAiChat`：输入是文本和偏好，输出是客户端消息状态与流控制。
-2. `app/api/[[...route]]/route.ts` 的 `/chat` 挂载：输入是 `/api/chat` 请求，输出是 chatRoute。
-3. `app/api/[[...route]]/chat.ts` 的 POST handler：输入是用户消息，输出是 SSE response。
-4. `lib/ai/provider.ts` 的 `myProvider.languageModel`：输入是已校验 modelId，输出是语言模型。
-5. `components/chat/message-parts.tsx`：输入是不断更新的 parts，输出是可见内容。
+主链：列表查询 -> 侧栏选择 -> /chat?chatId=UUID -> 改名/置顶/删除 -> 缓存同步。
 
-选读证据：`node_modules/ai/dist/index.d.ts` 中 `streamText`、`toUIMessageStreamResponse`、`convertToModelMessages`。暂缓阅读：历史列表。状态：`大纲`。
+阅读顺序：
 
-## 课程 04：保证消息持久化和重试幂等
+1. app/api/[[...route]]/chat.ts：列表及 CRUD。
+2. hooks/use-chat-list.ts：useChatList、useChatDetail、useUpdateChat、useDeleteChat。
+3. components/sidebar/nav-chats.tsx、chat-sidebar-item.tsx。
+4. stores/chat-ui-store.ts：removeChat。
 
-读完能回答：网络重试为什么不会重复插入同一条用户消息？
+理解问题：后端 nextCursor 已返回，为什么当前界面仍只展示一批会话？
 
-主链：收到消息 → 校验所有权 → 幂等保存 user message → 启动流 → `onFinish` 保存 assistant message → 更新时间。
+## 课程 07：附件与异常恢复
 
-必读顺序：
+状态：附件和基本恢复逻辑已实现；异常路径待真实联调。
 
-1. `lib/chat/persistence.ts` 的保存函数：输入是 UIMessage，输出是唯一数据库记录。
-2. `lib/chat/mapper.ts` 的双向映射：输入是 Prisma JSON/AI SDK parts，输出是稳定的 UIMessage。
-3. `app/api/[[...route]]/chat.ts` 的流完成回调：输入是 responseMessage，输出是助手消息和会话更新时间。
+主链：附件上传 -> 校验与 OSS -> 站内 URL -> 模型输入准备 -> 生成/失败 -> 保存或清理。
 
-选读证据：Prisma 唯一键冲突行为。暂缓阅读：跨进程流恢复；MVP 断开后允许重新生成。状态：`大纲`。
+阅读顺序：
 
-## 课程 05：完成聊天页面与核心组件
+1. hooks/use-ai-chat.ts：uploadAttachment、sendText、stop、regenerate。
+2. lib/chat-attachment-storage.ts：uploadChatAttachment、readOwnedChatAttachment。
+3. lib/chat-attachment-preparer.ts：createStoredAttachmentPreparer。
+4. lib/chat/model-attachments.ts：文本提取与模型输入。
+5. app/api/[[...route]]/chat.ts：附件路由、onError、onEnd。
 
-读完能回答：哪些状态应该由 AI SDK 管，哪些状态应该由组件本地管理？
+理解问题：聊天附件与知识库文档有哪些不同？模型失败、停止和切页分别如何处理？
 
-主链：路由 chatId → 初始消息 → `ChatShell` → `MessageList` + `ChatComposer` → 用户交互。
+## 课程 08：验证与后续交付
 
-必读顺序：
-
-1. `app/(routes)/(dashboard)/chat/[id]/page.tsx`：输入是路由 ID，输出是带初始数据的页面。
-2. `components/chat/chat-shell.tsx`：输入是 chat 与 messages，输出是整体对话状态编排。
-3. `components/chat/message-list.tsx`、`message-item.tsx`、`message-parts.tsx`：输入是 messages，输出是可访问的消息 UI。
-4. `components/chat/chat-composer.tsx`：输入是 status 和草稿，输出是 send/stop 事件。
-5. `hooks/use-chat-scroll.ts`：输入是消息变化和滚动位置，输出是滚动策略。
-
-选读证据：`components/ui/autosize-textarea.tsx`、现有 Button/Select/Sheet。暂缓阅读：高级 Markdown 样式。状态：`大纲`。
-
-## 课程 06：实现会话历史管理
-
-读完能回答：新建、打开、改名和删除会话怎样保持 UI 与数据库一致？
-
-主链：历史面板打开 → Query 拉取列表 → 选择路由 → mutation 改名/删除 → 缓存同步。
-
-必读顺序：
-
-1. `app/api/[[...route]]/chat.ts` 的 GET/PATCH/DELETE：输入是分页或会话 ID，输出是用户范围内的数据。
-2. `hooks/use-chat-history.ts`：输入是 API 合约，输出是 query/mutation 状态。
-3. `components/chat/chat-history.tsx`：输入是分页列表，输出是历史导航。
-4. `app/(routes)/(dashboard)/_common/header.tsx`：输入是打开历史/新建事件，输出是导航动作。
-
-选读证据：`hooks/use-note.ts` 的现有 React Query 写法。暂缓阅读：搜索会话全文。状态：`大纲`。
-
-## 课程 07：补齐异常状态与交互质量
-
-读完能回答：模型报错、断网、用户停止和空回复时页面分别怎样恢复？
-
-主链：异常发生 → 服务端安全错误映射或客户端 status → 保留上下文 → 重试/停止/清错 → 恢复 ready。
-
-必读顺序：
-
-1. `app/api/[[...route]]/route.ts` 的 `onError`：输入是服务器异常，输出是标准 HTTP 错误。
-2. `app/api/[[...route]]/chat.ts` 的 stream `onError/onFinish`：输入是 provider 或中止事件，输出是安全消息与持久化状态。
-3. `hooks/use-ai-chat.ts` 的 `status/error/stop/regenerate`：输入是流生命周期，输出是页面动作。
-4. `components/chat/chat-error.tsx`、`chat-composer.tsx`：输入是错误和状态，输出是用户可恢复路径。
-
-选读证据：Sonner 的现有使用方式。暂缓阅读：自动多次重试，避免重复计费。状态：`大纲`。
-
-## 课程 08：验证与分阶段交付
-
-读完能回答：怎样证明聊天模块已达到可用状态？
-
-主链：迁移检查 → 类型与 lint → 构建 → 双用户安全测试 → 流式与历史手测 → 交付。
-
-必读顺序：
-
-1. `package.json` 的 `db:migrate`、`typecheck`、`lint`、`build`：输入是实现结果，输出是静态和构建证据。
-2. `/chat/[id]` 真实页面：输入是发送、停止、刷新、重试、删除动作，输出是用户可见结果。
-3. 数据库 Chat/Message 记录：输入是两名用户的操作，输出是隔离、顺序和幂等证据。
+状态：知识库已有自动化测试；聊天专用回归测试和真实交互验收仍需补齐。
 
 验收清单：
 
-- 新会话首条消息能尽快开始流式显示。
-- 刷新页面后消息顺序和内容一致。
-- 同一个请求重试不会产生重复用户消息。
-- 用户 A 无法读取、修改或删除用户 B 的 chat id。
-- 模型 ID 非法时在调用 provider 前返回 400。
-- 停止生成后 UI 回到可操作状态，已生成内容的保存策略明确。
-- 删除当前会话后跳转到新会话页，历史缓存同步。
-- 空输入不会发送；Enter/Shift+Enter、移动端输入和自动滚动符合预期。
-- `npm run typecheck`、`npm run lint`、`npm run build` 通过。
+- [ ] 新建、发送、停止、重新生成及刷新恢复。
+- [ ] 改名、置顶、删除和当前会话导航。
+- [ ] 双用户越权读取、更新、删除被拒绝。
+- [ ] 重复请求不重复插入用户消息，合法重新生成保持正确分支。
+- [ ] 文档和图片附件正常，发送失败及删除后的资源处理符合预期。
+- [ ] 非法模型/工具在模型调用前失败，图片消息选择符合配置。
+- [ ] 仪表盘内切页继续生成与整页刷新后的行为分别验证。
+- [ ] 输入、滚动、移动端及键盘操作符合预期。
 
-选读证据：浏览器 Network 中的 SSE 数据帧和服务端日志。暂缓阅读：压测与成本报表。状态：`大纲`。
+现有检查命令：npm run typecheck、npm test、npm run lint、npm run build。知识库测试使用模拟服务，不能作为聊天真实模型和浏览器验收的证据。
 
-## 推荐实施顺序
+最近一次全量 lint 存在 Prisma 生成文件及其他组件报错，知识库范围 lint 已通过；修复全量检查问题应单独处理，不修改生成文件来消除报错。
 
-1. 修复 Prisma `part/parts` 差异，增加所有权和排序索引。
-2. 抽出 model allowlist、chat schemas、mapper、persistence。
-3. 完成 `POST /api/chat` 的保存、`streamText`、流返回和结束落库。
-4. 创建 `/chat/[id]` 与 `useAiChat`，先打通纯文本流。
-5. 完成 MessageList、MessageParts、Composer、空状态和错误状态。
-6. 增加会话列表、详情、改名、删除接口及 React Query hooks。
-7. 加入模型选择持久化、停止、重新生成、复制和滚动控制。
-8. 做双用户越权、刷新恢复、请求重试和响应式验收。
-9. 文本闭环稳定后，再加入 Markdown、工具调用、附件、来源卡片和 RAG。
+## 下一步实施顺序
+
+1. 按知识库大纲做 P2-a：列表、文件树、上传、状态和只读预览，并联调现有 P1。
+2. 做 P2-b：正文保存、乐观锁、阅读/编辑/对照，再补自动保存。
+3. 做 P2-c：下载原件、单文档删除和重新解析。
+4. 完成 P3：当前正文版本分块，再确定 Embedding 和 RAG 接入。
+5. 聊天按实际问题补充回归测试、连续分页和交互验收；工具、语音、计费及跨设备流恢复另行规划。
 
 ## 自学提醒
 
-若某个文件或原理看不懂，可以继续追问 AI 展开对应课程；本大纲负责给出学习与实现路线，没有逐行讲解全部源码。
+保留以上课程编号用于后续展开。若某个文件或原理看不懂，可以继续追问 AI；本文负责列出实际源码和开发顺序，未展开逐行课程。
 

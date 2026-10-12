@@ -49,6 +49,8 @@ vi.mock("@/lib/storage/oss", () => oss)
 const source = Buffer.from("# 文档\n\n正文")
 const document = {
   id: "document-id",
+  knowledgeBaseId: "base",
+  knowledgeBase: { userId: "owner" },
   type: "MARKDOWN",
   originalFileName: "REPORT.MD",
   mimeType: "text/markdown",
@@ -213,6 +215,85 @@ describe("knowledge upload", () => {
 })
 
 describe("knowledge document jobs", () => {
+  it("reparse replaces the body, advances its revision, and durably queues old image cleanup", async () => {
+    const assetName = "20000000-0000-4000-8000-000000000002-0001.png"
+    db.documentProcessingJob.findFirst.mockResolvedValue({
+      ...job,
+      type: "REPARSE",
+    })
+    db.knowledgeDocument.findFirst.mockResolvedValue({
+      ...document,
+      knowledgeBaseId: "base",
+      parseMetadata: { assetNames: [assetName] },
+    })
+    await processNextDocumentJob()
+    expect(db.$queryRaw).toHaveBeenCalledOnce()
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      db.knowledgeDocument.updateMany.mock.invocationCallOrder[1]
+    )
+    expect(db.knowledgeDocument.updateMany).toHaveBeenCalledWith({
+      where: { id: document.id, deletedAt: null },
+      data: expect.objectContaining({
+        status: "READY",
+        markdownContent: source.toString(),
+        contentRevision: { increment: 1 },
+        revision: { increment: 1 },
+        chunkStatus: "PENDING",
+        chunkedContentRevision: null,
+      }),
+    })
+    expect(db.documentProcessingJob.createMany).toHaveBeenCalledWith({
+      skipDuplicates: true,
+      data: [
+        expect.objectContaining({
+          type: "CLEANUP",
+          payload: {
+            storageKey: `knowledge-document-assets/${document.id}/${assetName}`,
+            documentId: document.id,
+            reason: "reparse",
+          },
+        }),
+      ],
+    })
+    expect(oss.deleteOssObject).not.toHaveBeenCalled()
+  })
+
+  it("does not register old-image cleanup when the parse result loses its lease", async () => {
+    const assetName = "20000000-0000-4000-8000-000000000002-0001.png"
+    db.knowledgeDocument.findFirst.mockResolvedValue({
+      ...document,
+      parseMetadata: { assetNames: [assetName] },
+    })
+    db.documentProcessingJob.updateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValue({ count: 0 })
+    await processNextDocumentJob()
+    expect(db.documentProcessingJob.createMany).not.toHaveBeenCalled()
+    expect(oss.deleteOssObject).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    "cleanup does not alter document parse status (OSS failure: %s)",
+    async (failure) => {
+      db.documentProcessingJob.findFirst.mockResolvedValue({
+        ...job,
+        type: "CLEANUP",
+        payload: { storageKey: document.storageKey },
+      })
+      if (failure)
+        oss.deleteOssObject.mockRejectedValue(new Error("OSS unavailable"))
+      await processNextDocumentJob()
+      expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
+      expect(db.documentProcessingJob.updateMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: failure ? "PENDING" : "SUCCEEDED",
+          }),
+        })
+      )
+    }
+  )
+
   it("commits parsed content and job success", async () => {
     await expect(processNextDocumentJob()).resolves.toBe(true)
     expect(db.knowledgeDocument.updateMany).toHaveBeenCalledWith({

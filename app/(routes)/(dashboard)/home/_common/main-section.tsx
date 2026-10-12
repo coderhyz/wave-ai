@@ -1,15 +1,12 @@
-
 import Header from "@/app/(routes)/(dashboard)/_common/header"
+import { KnowledgeWorkspace } from "@/components/knowledge/knowledge-workspace"
 function MainSection() {
   return (
-    <div className="relative min-h-0 w-full items-center justify-center">
-      {/* Header */}
-      <Header />
-
-      {/* 聊天部分 */}
-      {/* 笔记部分 */}
-      <div className="mt-7 w-full">
-        <h2 className="text-sm dark:text-gray-300">这里是笔记部分</h2>
+    <div className="h-dvh w-full overflow-hidden pt-13">
+      <Header title="知识库" />
+      {/* 保留现有 /home 入口，目录和正文各自在面板内滚动。 */}
+      <div className="h-full min-h-0">
+        <KnowledgeWorkspace />
       </div>
     </div>
   )

@@ -11,10 +11,10 @@ import {
 import {
   deleteKnowledgeFolder,
   updateKnowledgeFolder,
-} from "@/lib/knowledge/service"
+} from "@/lib/knowledge/management/service"
 
 /**
- * 文件夹接口：重命名、排序、同库移动和递归软删除。
+ * 文件夹接口：重命名、排序、同库移动和递归删除。
  * route.ts 会将本路由挂载到 /api/knowledge-folders。
  * 路由层只负责认证、参数校验和响应组装，事务与目录规则集中在 service 层。
  */

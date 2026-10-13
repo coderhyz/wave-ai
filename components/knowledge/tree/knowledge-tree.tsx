@@ -22,7 +22,6 @@ import {
 import { KnowledgeTreeBranch, type BranchProps } from "./knowledge-tree-branch"
 
 type TreeProps = Omit<BranchProps, "onAction"> & {
-  canLeaveDocument: () => boolean
   onSelectionDeleted: (clearFolder: boolean) => void
   onKnowledgeBaseDeleted: () => void
 }
@@ -63,30 +62,6 @@ export function KnowledgeTreeView(props: TreeProps) {
   function remove() {
     if (!action) return
     const { item } = action
-    const selectedDocument = props.tree.documents.find(
-      ({ id }) => id === props.selectedDocumentId
-    )
-    let affectsSelection =
-      item.kind === "base" ||
-      (item.kind === "document" && item.id === props.selectedDocumentId)
-    if (item.kind === "folder") {
-      // 删除祖先目录也会带走当前文件；只在删除范围覆盖当前选择时检查未保存草稿。
-      for (let folderId of [
-        props.selectedFolderId,
-        selectedDocument?.folderId,
-      ]) {
-        while (folderId) {
-          if (folderId === item.id) {
-            affectsSelection = true
-            break
-          }
-          folderId = props.tree.folders.find(
-            ({ id }) => id === folderId
-          )?.parentId
-        }
-      }
-    }
-    if (affectsSelection && !props.canLeaveDocument()) return
     if (item.kind === "base") {
       deleteBase.mutate(undefined, {
         onSuccess: () => {

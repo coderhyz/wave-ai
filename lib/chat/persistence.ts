@@ -21,8 +21,8 @@ export class ChatOwnershipError extends Error {
  * 用于阻止同一个消息 ID 被写入不同会话或保存不同内容。
  */
 export class MessageConflictError extends Error {
-  constructor() {
-    super("消息已经归属于其他会话")
+  constructor(message = "消息已经归属于其他会话") {
+    super(message)
     this.name = "MessageConflictError"
   }
 }
@@ -39,11 +39,13 @@ export const getOrCreateOwnedChat = async ({
   userId,
   modelId,
   firstMessage,
+  documentId = null,
 }: {
   id: string
   userId: string
   modelId: ChatModelId
   firstMessage: UIMessage
+  documentId?: string | null
 }) => {
   const createResult = await prisma.chat.createMany({
     data: [
@@ -52,6 +54,7 @@ export const getOrCreateOwnedChat = async ({
         userId,
         modelId,
         title: createProvisionalTitle(firstMessage),
+        documentId,
       },
     ],
     skipDuplicates: true,
@@ -61,6 +64,10 @@ export const getOrCreateOwnedChat = async ({
 
   if (!chat || chat.userId !== userId) {
     throw new ChatOwnershipError()
+  }
+
+  if ((chat.documentId ?? null) !== documentId) {
+    throw new MessageConflictError("会话检索范围不匹配，请重新打开文档问答")
   }
 
   if (chat.modelId !== modelId) {
@@ -80,7 +87,7 @@ export const getOrCreateOwnedChat = async ({
  * 幂等保存一条用户消息或助手消息。
  *
  * 相同消息 ID 的重复请求只会保存一次。写入完成后会重新读取消息，
- * 并核对 chatId、role 和 parts，防止消息 ID 被错误复用。
+ * 核对 chatId 和 role；重复 ID 还需核对 parts，防止消息 ID 被错误复用。
  */
 export const saveMessageOnce = async ({
   chatId,
@@ -126,7 +133,10 @@ export const saveMessageOnce = async ({
     !storedMessage ||
     storedMessage.chatId !== chatId ||
     storedMessage.role !== message.role ||
-    !isDeepStrictEqual(storedMessage.parts, serializedParts)
+    // 新插入的内容由本次请求确定；Prisma 写入 JSON 小数可能改变末位精度。
+    // 只有重复 ID 才需要比较已有内容，防止复用消息 ID 覆盖另一条消息。
+    (createResult.count === 0 &&
+      !isDeepStrictEqual(storedMessage.parts, serializedParts))
   ) {
     throw new MessageConflictError()
   }

@@ -12,15 +12,8 @@ export function getFilePreviewKind(filename: string, mimeType: string | null) {
       return "markdown"
     case "txt":
       return "text"
-    case "png":
-    case "jpg":
-    case "jpeg":
-    case "gif":
-    case "webp":
-    case "bmp":
-      return "image"
   }
-  // SVG 不纳入预览，避免加载包含外部资源的主动内容。
+  // MIME 只补充四种受支持文档的识别，其余类型保留下载入口。
   switch (mimeType?.split(";")[0].trim().toLowerCase()) {
     case "application/pdf":
       return "pdf"
@@ -30,12 +23,6 @@ export function getFilePreviewKind(filename: string, mimeType: string | null) {
       return "markdown"
     case "text/plain":
       return "text"
-    case "image/png":
-    case "image/jpeg":
-    case "image/gif":
-    case "image/webp":
-    case "image/bmp":
-      return "image"
     default:
       return "unsupported"
   }

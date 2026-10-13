@@ -62,6 +62,8 @@ interface ChatComposerProps {
   onModelChange: (modelId: ChatModelId) => void
   status: ChatStatus
   variant?: "hero" | "docked"
+  allowAttachments?: boolean
+  placeholder?: string
 }
 
 /** 在输入框顶部展示待发送附件，删除操作直接更新 PromptInput 的附件状态。 */
@@ -142,6 +144,8 @@ export function ChatComposer({
   onModelChange,
   status,
   variant = "docked",
+  allowAttachments = true,
+  placeholder = "问点什么，一起探索",
 }: ChatComposerProps) {
   const isHero = variant === "hero"
   const isGenerating = status === "submitted" || status === "streaming"
@@ -162,6 +166,10 @@ export function ChatComposer({
 
   const handleAttachmentError = useCallback(
     ({ code }: { code: "max_files" | "max_file_size" | "accept" }) => {
+      if (!allowAttachments) {
+        toast.error("文档问答仅支持文字提问")
+        return
+      }
       const messages = {
         accept: "目前支持图片、PDF、DOCX、TXT、Markdown、JSON 和 CSV 文件",
         max_file_size: "单个附件不能超过 2 MB",
@@ -170,7 +178,7 @@ export function ChatComposer({
 
       toast.error(messages[code])
     },
-    []
+    [allowAttachments]
   )
 
   return (
@@ -183,12 +191,12 @@ export function ChatComposer({
           : "[&_[data-slot=input-group]]:rounded-2xl [&_[data-slot=input-group]]:border-border/80"
       )}
       maxFileSize={MAX_ATTACHMENT_SIZE}
-      maxFiles={MAX_ATTACHMENTS}
+      maxFiles={allowAttachments ? MAX_ATTACHMENTS : 0}
       multiple
       onError={handleAttachmentError}
       onSubmit={handleSubmit}
     >
-      <ComposerAttachments />
+      {allowAttachments && <ComposerAttachments />}
 
       <PromptInputBody>
         <PromptInputTextarea
@@ -199,7 +207,7 @@ export function ChatComposer({
           )}
           disabled={isGenerating}
           onChange={(event) => onValueChange(event.currentTarget.value)}
-          placeholder="问点什么，一起探索"
+          placeholder={placeholder}
           value={value}
         />
       </PromptInputBody>
@@ -208,38 +216,40 @@ export function ChatComposer({
         className={cn("px-4 pb-3", isHero && "px-5 pb-4 md:px-6")}
       >
         <PromptInputTools>
-          <PromptInputActionMenu>
-            <PromptInputActionMenuTrigger
-              aria-label="添加附件或选择工具"
-              className="size-9 rounded-full border border-border/80 bg-background/70 text-foreground shadow-xs hover:border-primary/30 hover:bg-primary/5"
-              disabled={isGenerating}
-              tooltip="添加附件或工具"
-            />
-            <PromptInputActionMenuContent
-              className="w-60 rounded-2xl border-border/80 p-2 shadow-xl"
-              side="top"
-            >
-              <PromptInputActionAddAttachments
-                className="h-11 rounded-xl text-base"
+          {allowAttachments && (
+            <PromptInputActionMenu>
+              <PromptInputActionMenuTrigger
+                aria-label="添加附件或选择工具"
+                className="size-9 rounded-full border border-border/80 bg-background/70 text-foreground shadow-xs hover:border-primary/30 hover:bg-primary/5"
                 disabled={isGenerating}
-                label="添加照片和文件"
+                tooltip="添加附件或工具"
               />
-              <PromptInputActionMenuItem
-                className="h-11 rounded-xl text-base"
-                disabled
+              <PromptInputActionMenuContent
+                className="w-60 rounded-2xl border-border/80 p-2 shadow-xl"
+                side="top"
               >
-                <Microscope className="mr-2 size-5" />
-                深度研究
-              </PromptInputActionMenuItem>
-              <PromptInputActionMenuItem
-                className="h-11 rounded-xl text-base"
-                disabled
-              >
-                <Globe2 className="mr-2 size-5" />
-                网页搜索
-              </PromptInputActionMenuItem>
-            </PromptInputActionMenuContent>
-          </PromptInputActionMenu>
+                <PromptInputActionAddAttachments
+                  className="h-11 rounded-xl text-base"
+                  disabled={isGenerating}
+                  label="添加照片和文件"
+                />
+                <PromptInputActionMenuItem
+                  className="h-11 rounded-xl text-base"
+                  disabled
+                >
+                  <Microscope className="mr-2 size-5" />
+                  深度研究
+                </PromptInputActionMenuItem>
+                <PromptInputActionMenuItem
+                  className="h-11 rounded-xl text-base"
+                  disabled
+                >
+                  <Globe2 className="mr-2 size-5" />
+                  网页搜索
+                </PromptInputActionMenuItem>
+              </PromptInputActionMenuContent>
+            </PromptInputActionMenu>
+          )}
 
           <PromptInputSelect
             disabled={isGenerating}

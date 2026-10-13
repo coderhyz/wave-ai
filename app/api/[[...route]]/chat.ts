@@ -7,15 +7,24 @@ import {
   consumeStream,
   convertToModelMessages,
   createUIMessageStreamResponse,
+  isStepCount,
   streamText,
   toUIMessageStream,
   validateUIMessages,
   type UIMessage,
+  type ToolSet,
 } from "ai"
 import { getAuthUser } from "@/lib/hono/hono-middware"
 import { getChatGenerationSettings, myProvider } from "@/lib/ai/provider"
 import { resolveChatModelId } from "@/lib/ai/model"
+import { getKnowledgeCitations } from "@/lib/chat/citations"
 import { CHAT_SYSTEM_PROMPT } from "@/lib/ai/prompts"
+import {
+  createKnowledgeListTool,
+  createKnowledgeSearchTool,
+} from "@/lib/ai/tool/knowledge-search"
+import { getWeather } from "@/lib/ai/tool/weather"
+import { webSearch } from "@/lib/ai/tool/web-search"
 import {
   chatIdSchema,
   chatListQuerySchema,
@@ -44,6 +53,16 @@ import {
   saveMessageOnce,
 } from "@/lib/chat/persistence"
 import prisma from "@/lib/prisma"
+
+/** 文档会话读取及发送入口都先校验当前用户的文档访问权。 */
+const requireChatDocument = async (userId: string, documentId: string) => {
+  const document = await prisma.knowledgeDocument.findFirst({
+    where: { id: documentId, deletedAt: null, knowledgeBase: { userId, deletedAt: null } },
+    select: { id: true, status: true, chunkStatus: true, contentRevision: true, chunkedContentRevision: true },
+  })
+  if (!document) throw new HTTPException(404, { message: "文档不存在或无权访问" })
+  return document
+}
 
 /** 附件路由只接受 UUID，提前拒绝非法路径参数。 */
 const attachmentIdSchema = z.object({ id: z.string().uuid() }).strict()
@@ -90,6 +109,29 @@ const throwApiError = (error: unknown, fallbackMessage: string): never => {
  * DELETE /:id            删除会话
  */
 export const chatRoute = new Hono()
+  .get(
+    "/documents/:documentId",
+    getAuthUser,
+    zValidator("param", z.object({ documentId: z.string().uuid() })),
+    async (c) => {
+      try {
+        const userId = c.get("user").id
+        const { documentId } = c.req.valid("param")
+        await requireChatDocument(userId, documentId)
+        const chat = await prisma.chat.findFirst({
+          where: { userId, documentId },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          include: { messages: { orderBy: { createdAt: "asc" } } },
+        })
+        c.header("Cache-Control", "private, no-store")
+        if (!chat) return c.json({ success: true, chat: null, messages: [] })
+        const { messages, ...chatData } = chat
+        return c.json({ success: true, chat: chatData, messages: messages.map(toUIMessage) })
+      } catch (error) {
+        return throwApiError(error, "读取文档问答失败")
+      }
+    }
+  )
   /** 上传附件：鉴权、限制请求体、校验参数后交给 OSS 存储模块。 */
   .post(
     "/attachments",
@@ -211,13 +253,14 @@ export const chatRoute = new Hono()
         /** 请求已通过 sendChatMessageSchema，下面直接使用经过校验的数据。 */
         const {
           id,
-          message: rawMessage,
-          selectedModelId: requestedModelId,
-          selectedToolName,
-          trigger,
+          documentId,
+          message: rawMessage, // UIMessage，可能包含图片或 PDF 附件
+          selectedModelId: requestedModelId, // 客户端选择的模型，可能不支持视觉输入。
+          selectedToolName,   // 客户端选择的额外工具；知识库检索由服务端默认提供。
+          trigger,    // 触发类型：用户发送、重新生成、分支生成等。
         } = c.req.valid("json")
 
-        /** 接口保留工具字段，但当前版本不允许客户端启用工具。 */
+        /** 知识库检索默认启用；客户端选择的额外工具尚未实现。 */
         if (selectedToolName !== null) {
           throw new HTTPException(400, {
             message: "所选择的工具暂不支持",
@@ -228,6 +271,17 @@ export const chatRoute = new Hono()
         const [message] = await validateUIMessages<UIMessage>({
           messages: [rawMessage],
         })
+
+        if (documentId) {
+          const document = await requireChatDocument(user.id, documentId)
+          if (
+            document.status !== "READY" || document.chunkStatus !== "READY" ||
+            document.chunkedContentRevision !== document.contentRevision
+          ) throw new HTTPException(409, { message: "文档尚未完成索引，请完成后再提问" })
+          if (message.parts.some((part) => part.type === "file")) {
+            throw new HTTPException(400, { message: "文档问答仅支持针对当前文档的文字问题" })
+          }
+        }
 
         /** 图片输入可能要求视觉模型，因此最终模型不一定等于客户端选择。 */
         const hasImageInput = message.parts.some(
@@ -245,11 +299,12 @@ export const chatRoute = new Hono()
         await prepareMessagesForModel([message])
 
         // 首条消息创建会话；已有会话则检查它是否属于当前用户。
-        await getOrCreateOwnedChat({
+        const { chat } = await getOrCreateOwnedChat({
           id,
           userId: user.id,
           modelId: selectedModelId,
           firstMessage: message,
+          documentId,
         })
 
         // 消息 ID 用作幂等键，网络重试不会重复插入同一条用户消息。
@@ -307,8 +362,17 @@ export const chatRoute = new Hono()
         }
 
         /** 数据库存储结构先映射回 UIMessage，再由 AI SDK 做一次语义校验。 */
+        const tools: ToolSet = {
+          searchKnowledge: createKnowledgeSearchTool({ userId: user.id, documentId: chat.documentId ?? undefined }),
+        }
+        if (!chat.documentId) {
+          tools.listKnowledgeDocuments = createKnowledgeListTool({ userId: user.id })
+          tools.getWeather = getWeather
+          tools.webSearch = webSearch
+        }
         const uiMessages = await validateUIMessages<UIMessage>({
           messages: storedMessages.map(toUIMessage),
+          tools,
         })
         /** 流开始前固定助手消息时间，流式片段和最终入库保持一致。 */
         const assistantCreatedAt = new Date().toISOString()
@@ -316,11 +380,34 @@ export const chatRoute = new Hono()
         /** streamText 负责调用选定模型，并产生服务端流式文本结果。 */
         const result = streamText({
           model: myProvider.languageModel(selectedModelId),
-          instructions: CHAT_SYSTEM_PROMPT,
+          instructions: CHAT_SYSTEM_PROMPT + (chat.documentId
+            ? "\n本轮是文档预览问答。用户的文档内容问题仅依据当前文档检索结果回答，不使用其他知识库文档、旧回答或一般知识补齐。"
+            : ""),
           /** 附件解析完成后，将 UIMessage 转换成模型供应商需要的消息格式。 */
           messages: await convertToModelMessages(
-            await prepareMessagesForModel(uiMessages)
+            await prepareMessagesForModel(uiMessages),
+            // 停止生成可能留下未完成的工具调用，下一轮不把它发给模型。
+            { tools, ignoreIncompleteToolCalls: true }
           ),
+          tools,
+          stopWhen: isStepCount(3),
+          // 最多两轮工具调用，最后一轮只回答，避免到达上限时仅有工具调用。
+          prepareStep: ({ stepNumber }) => {
+            if (stepNumber === 2) return { toolChoice: "none" }
+            if (chat.documentId && stepNumber === 0) {
+              return {
+                toolChoice: { type: "tool", toolName: "searchKnowledge" },
+                // DeepSeek 思考模式不支持指定工具；只关闭首轮检索的思考。
+                ...(selectedModelId === "deepseek-v4-pro"
+                  ? {
+                    providerOptions: {
+                      deepseek: { thinking: { type: "disabled" } },
+                    },
+                  }
+                  : {}),
+              }
+            }
+          },
           ...getChatGenerationSettings(selectedModelId),
           abortSignal: c.req.raw.signal,
           maxRetries: 2,
@@ -362,6 +449,7 @@ export const chatRoute = new Hono()
                   createdAt: assistantCreatedAt,
                   modelId: selectedModelId,
                   isAborted,
+                  citationChunkIds: getKnowledgeCitations(responseMessage).map((citation) => citation.chunkId),
                 },
                 finishReason: finishReason ?? "other",
                 promptTokens: usage?.inputTokens ?? null,
@@ -405,7 +493,7 @@ export const chatRoute = new Hono()
         const { cursor, limit } = c.req.valid("query")
         /** 多取一条用于判断是否还有下一页，而不额外执行 count 查询。 */
         const chats = await prisma.chat.findMany({
-          where: { userId: user.id },
+          where: { userId: user.id, documentId: null },
           /** 置顶会话优先；同级按最近更新排序，id 用于稳定兜底。 */
           orderBy: [
             { isPinned: "desc" },

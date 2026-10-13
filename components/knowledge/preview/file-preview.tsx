@@ -1,6 +1,5 @@
 "use client"
 
-import { useState } from "react"
 import dynamic from "next/dynamic"
 import { OriginalMarkdown } from "./original-markdown"
 import { Download, LoaderCircle, RefreshCw, X } from "lucide-react"
@@ -36,9 +35,6 @@ export function FilePreview({
   // Query 负责鉴权、签名及原件字节；此处不读取解析正文，也不创建第二套加载状态。
   const query = useKnowledgeFilePreview(documentId)
   const file = query.data
-  const [imageStatus, setImageStatus] = useState<"loading" | "ready" | "error">(
-    "loading"
-  )
   const download = useMutation({
     mutationFn: (filename: string) =>
       downloadKnowledgeDocumentOriginal(documentId, filename),
@@ -68,11 +64,7 @@ export function FilePreview({
           variant="outline"
           size="sm"
           disabled={query.isFetching}
-          onClick={() => {
-            // 刷新会重新获取签名；图片同样重新进入加载状态，不保留过期链接的错误。
-            setImageStatus("loading")
-            query.refetch()
-          }}
+          onClick={() => query.refetch()}
         >
           <RefreshCw className={query.isFetching ? "animate-spin" : ""} />
           刷新预览
@@ -136,32 +128,6 @@ export function FilePreview({
                   {file.text}
                 </pre>
               )}
-              {file.kind === "image" &&
-                (imageStatus === "error" ? (
-                  <p role="alert" className="p-6 text-sm text-destructive">
-                    图片加载失败或链接已过期，请刷新预览。
-                  </p>
-                ) : (
-                  <>
-                    {imageStatus === "loading" && (
-                      <p
-                        role="status"
-                        className="p-6 text-sm text-muted-foreground"
-                      >
-                        正在加载图片…
-                      </p>
-                    )}
-                    {/* 图片直接交给浏览器，不经 Next Image 代理或额外上传。 */}
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={file.url}
-                      alt={file.fileName}
-                      onLoad={() => setImageStatus("ready")}
-                      onError={() => setImageStatus("error")}
-                      className="mx-auto max-h-full max-w-full object-contain"
-                    />
-                  </>
-                ))}
               {file.kind === "unsupported" && (
                 <p className="p-6 text-sm text-muted-foreground">
                   暂不支持此类型在线预览，请点击“下载原件”后打开。
@@ -172,7 +138,7 @@ export function FilePreview({
         )}
       </div>
       <p className="text-xs text-muted-foreground">
-        这里显示 OSS 原件，不受解析状态或正文编辑影响。临时链接有效期为 15
+        这里显示 OSS 原件，不受解析状态影响。临时链接有效期为 15
         分钟，加载失败或过期时请刷新预览。
       </p>
     </section>

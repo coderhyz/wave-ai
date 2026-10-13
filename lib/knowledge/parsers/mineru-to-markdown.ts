@@ -7,7 +7,6 @@ import type JSZip from "jszip"
 import { parseWithMineru } from "@/lib/knowledge/parsers/mineru-client"
 import {
   extractMarkdownSections,
-  markdownToPlainText,
   normalizeText,
 } from "@/lib/knowledge/parsers/normalize"
 import {
@@ -85,11 +84,10 @@ export function createMineruParser(
         )
       ).trim()
 
-      // markdownContent 是后续预览、编辑和分块使用的唯一正文。
+      // markdownContent 是后续正文预览和分块使用的唯一正文。
       assertMarkdownSize(markdown)
       return {
         markdown,
-        plainText: markdownToPlainText(markdown),
         metadata: {
           format: kind,
           provider: "mineru",

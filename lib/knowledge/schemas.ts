@@ -1,6 +1,6 @@
 /** 知识库接口共用的 Zod 参数结构，使各路由保持一致的输入规则。 */
 import { z } from "zod"
-import { MAX_MARKDOWN_CHARACTERS } from "@/lib/knowledge/parsers/types"
+import { normalizeText } from "@/lib/knowledge/parsers/normalize"
 
 /** 知识库与目录接口共用的基础字段约束。 */
 const knowledgeId = z.string().uuid()
@@ -8,6 +8,23 @@ const knowledgeName = z.string().trim().min(1).max(100)
 const knowledgeDescription = z.string().trim().max(500).nullable()
 const folderName = z.string().trim().min(1).max(100)
 const sortOrder = z.number().int().min(0).max(2_147_483_647)
+
+/** 向量模式用于独立验证召回，混合模式使用 ES 关键词与 RRF。 */
+export const searchKnowledgeSchema = z
+  .object({
+    query: z
+      .string()
+      .max(2000)
+      .transform((value) => normalizeText(value).trim())
+      .pipe(z.string().min(1)),
+    knowledgeBaseId: knowledgeId.optional(),
+    documentId: knowledgeId.optional(),
+    mode: z.enum(["vector", "hybrid"]).default("hybrid"),
+    limit: z.number().int().min(1).max(20).default(6),
+  })
+  .strict()
+
+export type SearchKnowledgeInput = z.infer<typeof searchKnowledgeSchema>
 
 /** 所有知识库和文件夹路径参数统一使用 UUID。 */
 export const knowledgeIdParamSchema = z.object({ id: knowledgeId }).strict()
@@ -21,21 +38,11 @@ export type RenameKnowledgeDocumentInput = z.infer<
   typeof renameKnowledgeDocumentSchema
 >
 
-/** 正文允许清空；版本由读取详情时获得，用于阻止并发编辑互相覆盖。 */
-export const saveKnowledgeDocumentContentSchema = z
+/** 重解析会替换正文，必须携带用户确认时看到的版本。 */
+export const reparseKnowledgeDocumentSchema = z
   .object({
-    markdownContent: z.string().max(MAX_MARKDOWN_CHARACTERS),
     expectedContentRevision: z.number().int().min(0).max(2_147_483_647),
   })
-  .strict()
-
-export type SaveKnowledgeDocumentContentInput = z.infer<
-  typeof saveKnowledgeDocumentContentSchema
->
-
-/** 重解析会替换正文，必须携带用户确认时看到的版本。 */
-export const reparseKnowledgeDocumentSchema = saveKnowledgeDocumentContentSchema
-  .pick({ expectedContentRevision: true })
   .strict()
 
 export type ReparseKnowledgeDocumentInput = z.infer<

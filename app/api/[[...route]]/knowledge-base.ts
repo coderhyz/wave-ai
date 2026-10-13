@@ -18,14 +18,14 @@ import {
   getKnowledgeTree,
   listKnowledgeBases,
   updateKnowledgeBase,
-} from "@/lib/knowledge/service"
-import { createKnowledgeDocumentUpload } from "@/lib/knowledge/document-service"
+} from "@/lib/knowledge/management/service"
+import { createKnowledgeDocumentUpload } from "@/lib/knowledge/documents/document-service"
 import { MAX_KNOWLEDGE_FILE_BYTES } from "@/lib/knowledge/parsers/types"
 
 const MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 
 /**
- * 知识库根接口：列表、创建、元数据更新、软删除、树摘要和文件夹创建。
+ * 知识库根接口：列表、创建、元数据更新、物理删除、树摘要和文件夹创建。
  * route.ts 会将本路由挂载到 /api/knowledge-bases。
  * 每个接口先由 getAuthUser 注入可信用户，再由 zValidator 校验输入，最后调用 service。
  */

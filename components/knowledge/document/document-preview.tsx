@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
+import { useState } from "react"
 import { useMutation } from "@tanstack/react-query"
 import {
   Download,
@@ -8,6 +8,7 @@ import {
   FileText,
   LoaderCircle,
   MoreHorizontal,
+  MessageCircle,
   RefreshCw,
   Trash2,
 } from "lucide-react"
@@ -38,20 +39,21 @@ import {
 } from "@/components/ui/dialog"
 import { documentStatusLabels } from "../tree/knowledge-document-item"
 import { FilePreview } from "../preview/file-preview"
-import { DocumentEditor } from "./document-editor"
+import { DocumentChat } from "./document-chat"
+import { KnowledgeMarkdown } from "./knowledge-markdown"
 
-/** MD 沿用正文编辑器，其他文件直接预览 OSS 原件，不等待解析完成。 */
+/** MD 只读展示解析正文，其他文件直接预览 OSS 原件，不等待解析完成。 */
 export function DocumentPreview({
   documentId,
-  onLeaveGuardChange,
   onDeleted,
   onPreviewOriginal,
 }: {
   documentId: string
-  onLeaveGuardChange?: (guard: () => boolean) => void
   onDeleted?: () => void
   onPreviewOriginal?: () => void
 }) {
+  const [showChat, setShowChat] = useState(true)
+  const [chatExpanded, setChatExpanded] = useState(false)
   const query = useKnowledgeDocument(documentId)
   const reparse = useReparseKnowledgeDocument(documentId)
   const deletion = useDeleteKnowledgeDocument(documentId)
@@ -65,15 +67,6 @@ export function DocumentPreview({
     action: "reparse" | "delete"
     contentRevision: number
   } | null>(null)
-  const leaveGuard = useRef<() => boolean>(() => true)
-  // 同一守卫同时用于文档操作和外层切换，保存中的请求不能被删除或重解析打断。
-  const registerLeaveGuard = useCallback(
-    (guard: () => boolean) => {
-      leaveGuard.current = guard
-      onLeaveGuardChange?.(guard)
-    },
-    [onLeaveGuardChange]
-  )
   const changingDocument = reparse.isPending || deletion.isPending
   const actionError =
     confirmation?.action === "reparse" ? reparse.error : deletion.error
@@ -123,6 +116,18 @@ export function DocumentPreview({
               原件预览
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            aria-expanded={showChat}
+            onClick={() => {
+              setShowChat((open) => !open)
+              setChatExpanded(false)
+            }}
+          >
+            <MessageCircle />
+            {showChat ? "收起问答" : "文档问答"}
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -183,65 +188,95 @@ export function DocumentPreview({
         </div>
         <p className="text-xs break-words text-muted-foreground">
           {document.originalFileName}
-          {!showOriginal &&
-            ` · Markdown 文档 · 正文版本 ${document.contentRevision}`}
+          {!showOriginal && " · Markdown 文档"}
         </p>
-        {/* 后台读取失败时保留编辑器与草稿，但仍明确显示错误。 */}
+        {/* 后台读取失败时保留已加载的正文，并明确显示错误。 */}
         {query.isError && (
           <p role="alert" className="text-sm text-destructive">
             读取最新正文失败：{query.error.message}
           </p>
         )}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col overflow-auto p-5 md:p-8">
-        {/* PDF / DOCX / TXT 不挂载 Markdown 编辑器，避免把解析正文当作文件预览。 */}
-        {showOriginal && (
-          <FilePreview documentId={documentId} showFileInfo={false} />
-        )}
-        {!showOriginal && processing && (
-          <div
-            role="status"
-            className="flex items-center gap-3 rounded-lg border bg-muted/30 p-5 text-sm"
-          >
-            <LoaderCircle className="size-5 shrink-0 animate-spin" />
-            <div>
-              <p>
-                {document.status === "QUEUED"
-                  ? "等待解析任务执行"
-                  : "正在转换为 Markdown"}
-              </p>
-              <p className="mt-1 text-muted-foreground">
-                完成后会自动显示正文，请确保文档 Worker 已启动。
-              </p>
+      <div
+        className={
+          showChat && !chatExpanded
+            ? "grid min-h-0 flex-1 grid-rows-2 xl:grid-cols-[minmax(0,1fr)_minmax(320px,40%)] xl:grid-rows-1"
+            : "flex min-h-0 flex-1 flex-col"
+        }
+      >
+        <div
+          className={
+            showChat && chatExpanded
+              ? "hidden"
+              : "flex min-h-0 min-w-0 flex-1 flex-col overflow-auto p-5 md:p-8"
+          }
+        >
+          {showOriginal && (
+            <FilePreview documentId={documentId} showFileInfo={false} />
+          )}
+          {!showOriginal && processing && (
+            <div
+              role="status"
+              className="flex items-center gap-3 rounded-lg border bg-muted/30 p-5 text-sm"
+            >
+              <LoaderCircle className="size-5 shrink-0 animate-spin" />
+              <div>
+                <p>
+                  {document.status === "QUEUED"
+                    ? "等待解析任务执行"
+                    : "正在转换为 Markdown"}
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  完成后会自动显示正文，请确保文档 Worker 已启动。
+                </p>
+              </div>
             </div>
-          </div>
-        )}
-        {!showOriginal && document.status === "FAILED" && (
-          <div
-            role="alert"
-            className="space-y-2 rounded-lg border border-destructive/30 p-5 text-sm text-destructive"
+          )}
+          {!showOriginal && document.status === "FAILED" && (
+            <div
+              role="alert"
+              className="space-y-2 rounded-lg border border-destructive/30 p-5 text-sm text-destructive"
+            >
+              <p>文档解析失败</p>
+              <p>{document.parseErrorMessage}</p>
+              {document.parseErrorCode && (
+                <p className="text-xs">{document.parseErrorCode}</p>
+              )}
+            </div>
+          )}
+          {!showOriginal &&
+            document.status === "READY" &&
+            (document.markdownContent ? (
+              <KnowledgeMarkdown
+                content={document.markdownContent}
+                documentId={document.id}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">文档正文为空</p>
+            ))}
+        </div>
+        {showChat && (
+          <aside
+            className={
+              chatExpanded
+                ? "min-h-0 min-w-0 flex-1 overflow-hidden"
+                : "min-h-0 min-w-0 overflow-hidden border-t xl:border-t-0 xl:border-l"
+            }
           >
-            <p>文档解析失败</p>
-            <p>{document.parseErrorMessage}</p>
-            {document.parseErrorCode && (
-              <p className="text-xs">{document.parseErrorCode}</p>
-            )}
-          </div>
-        )}
-        {!showOriginal && document.status === "READY" && (
-          <DocumentEditor
-            key={document.id}
-            document={document}
-            reloading={query.isFetching || changingDocument}
-            onLeaveGuardChange={registerLeaveGuard}
-            onReload={async () => {
-              const result = await query.refetch()
-              if (result.error) throw result.error
-            }}
-          />
+            <DocumentChat
+              documentId={documentId}
+              expanded={chatExpanded}
+              onToggleExpand={() => setChatExpanded((expanded) => !expanded)}
+              ready={
+                document.status === "READY" &&
+                document.chunkStatus === "READY" &&
+                document.chunkedContentRevision === document.contentRevision
+              }
+            />
+          </aside>
         )}
       </div>
-      {/* 同一确认框承载两项破坏性操作；失败不关闭，也不丢弃编辑器草稿。 */}
+      {/* 删除和重解析仍需确认，操作失败时保留对话框供用户重试。 */}
       <Dialog
         open={confirmation !== null}
         onOpenChange={(open) => {
@@ -257,7 +292,7 @@ export function DocumentPreview({
             </DialogTitle>
             <DialogDescription>
               {confirmation?.action === "reparse"
-                ? `将从原件重新解析「${document.title}」。成功后替换当前正文（版本 ${confirmation.contentRevision}），已保存的编辑不会保留；失败不会清除现有正文。此操作不可撤销。`
+                ? `将从原件重新解析「${document.title}」。成功后更新当前正文；失败不会清除现有正文。`
                 : `将删除「${document.title}」，取消解析任务，并由 Worker 清理原件和解析图片。此操作不可撤销。`}
             </DialogDescription>
           </DialogHeader>
@@ -299,8 +334,7 @@ export function DocumentPreview({
                 (confirmation?.action === "reparse" && processing)
               }
               onClick={() => {
-                // 未保存草稿再由编辑器确认；保存请求尚未完成时不允许破坏性操作。
-                if (!confirmation || !leaveGuard.current()) return
+                if (!confirmation) return
                 if (confirmation.action === "reparse") {
                   reparse.mutate(
                     { expectedContentRevision: confirmation.contentRevision },

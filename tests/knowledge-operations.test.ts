@@ -5,17 +5,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { knowledgeDocumentRoute } from "@/app/api/[[...route]]/knowledge-document"
 import { knowledgeFolderRoute } from "@/app/api/[[...route]]/knowledge-folder"
 import { knowledgeBaseRoute } from "@/app/api/[[...route]]/knowledge-base"
+import { purgeDeletedKnowledgeBase } from "@/lib/knowledge/management/service"
 
 const { db, oss, login } = vi.hoisted(() => ({
   db: {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
-    knowledgeBase: { findFirst: vi.fn(), update: vi.fn() },
+    knowledgeBase: { findFirst: vi.fn(), update: vi.fn(), delete: vi.fn() },
     knowledgeFolder: {
       findFirst: vi.fn(),
       findMany: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
     knowledgeDocument: {
       findFirst: vi.fn(),
@@ -23,11 +25,14 @@ const { db, oss, login } = vi.hoisted(() => ({
       update: vi.fn(),
       updateMany: vi.fn(),
       findUniqueOrThrow: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
     },
     documentProcessingJob: {
       create: vi.fn(),
       createMany: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
   },
   oss: {
@@ -62,7 +67,6 @@ const document = {
   checksumSha256: "checksum",
   markdownContent: "已编辑的正文",
   contentRevision: 4,
-  revision: 7,
   parseMetadata: { assetNames: [assetName] },
 }
 const app = new Hono()
@@ -108,6 +112,8 @@ beforeEach(() => {
   db.knowledgeBase.findFirst.mockResolvedValue({ id: document.knowledgeBaseId })
   db.knowledgeDocument.findFirst.mockResolvedValue(document)
   db.knowledgeDocument.updateMany.mockResolvedValue({ count: 1 })
+  db.knowledgeDocument.deleteMany.mockResolvedValue({ count: 1 })
+  db.knowledgeFolder.deleteMany.mockResolvedValue({ count: 2 })
   // 详情响应不能包含内部对象键，与实际 Prisma select 的结果一致。
   db.knowledgeDocument.findUniqueOrThrow.mockResolvedValue({
     id,
@@ -118,6 +124,85 @@ beforeEach(() => {
   oss.getOssPreviewUrl.mockResolvedValue(
     "https://oss.example.test/file?signature=temporary"
   )
+})
+
+describe("read-only knowledge content", () => {
+  it("does not expose the former body save endpoint", async () => {
+    const response = await app.request(`/documents/${id}/content`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        markdownContent: "replacement",
+        expectedContentRevision: 4,
+      }),
+    })
+    expect(response.status).toBe(404)
+    expect(db.$transaction).not.toHaveBeenCalled()
+    expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe("historical deleted knowledge base purge", () => {
+  beforeEach(() => {
+    db.knowledgeBase.findFirst.mockResolvedValue({
+      id: "base-id",
+      deletedAt: new Date(),
+    })
+    db.knowledgeDocument.findMany.mockResolvedValue([document])
+  })
+
+  it("rechecks the deletion marker under the base lock and reuses physical deletion", async () => {
+    await expect(purgeDeletedKnowledgeBase("base-id")).resolves.toMatchObject({
+      documentCount: 1,
+      folderCount: 2,
+    })
+    expect(db.knowledgeBase.findFirst).toHaveBeenCalledWith({
+      where: { id: "base-id", deletedAt: { not: null } },
+      select: { id: true },
+    })
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      db.knowledgeBase.findFirst.mock.invocationCallOrder[0]
+    )
+    expect(db.knowledgeBase.delete).toHaveBeenCalledWith({
+      where: { id: "base-id" },
+    })
+    expect(db.documentProcessingJob.createMany).toHaveBeenCalled()
+    expect(db.documentProcessingJob.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          knowledgeBaseId: "base-id",
+          type: "CLEANUP",
+          status: { in: ["SUCCEEDED", "FAILED", "CANCELLED"] },
+        },
+        data: expect.objectContaining({
+          status: "PENDING",
+          attempts: 0,
+          availableAt: expect.any(Date),
+        }),
+      })
+    )
+  })
+
+  it("skips a missing or no-longer-deleted base without deleting any records", async () => {
+    db.knowledgeBase.findFirst.mockResolvedValue(null)
+    await expect(purgeDeletedKnowledgeBase("base-id")).resolves.toBeNull()
+    expect(db.documentProcessingJob.updateMany).not.toHaveBeenCalled()
+    expect(db.knowledgeDocument.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeFolder.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeBase.delete).not.toHaveBeenCalled()
+  })
+
+  it("does not physically delete the base if cleanup registration fails", async () => {
+    db.documentProcessingJob.createMany.mockRejectedValue(
+      new Error("database unavailable")
+    )
+    await expect(purgeDeletedKnowledgeBase("base-id")).rejects.toThrow(
+      "database unavailable"
+    )
+    expect(db.knowledgeDocument.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeFolder.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeBase.delete).not.toHaveBeenCalled()
+  })
 })
 
 describe("knowledge original preview", () => {
@@ -256,7 +341,6 @@ describe("knowledge reparse", () => {
           status: "QUEUED",
           parseErrorCode: null,
           parseErrorMessage: null,
-          revision: { increment: 1 },
         },
       })
       expect(db.documentProcessingJob.create).toHaveBeenCalledWith({
@@ -267,10 +351,7 @@ describe("knowledge reparse", () => {
           status: "PENDING",
           targetRevision: 4,
           dedupeKey: expect.stringMatching(/^reparse:/),
-          payload: {
-            storageKey: document.storageKey,
-            checksumSha256: "checksum",
-          },
+          payload: {},
         },
       })
       expect(db.$queryRaw).toHaveBeenCalledOnce()
@@ -333,7 +414,7 @@ describe("knowledge reparse", () => {
 })
 
 describe("knowledge document deletion", () => {
-  it("soft-deletes and registers original plus image cleanup without deleting OSS inline", async () => {
+  it("physically deletes and registers original plus image cleanup without deleting OSS inline", async () => {
     const response = await request("delete")
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({
@@ -341,36 +422,47 @@ describe("knowledge document deletion", () => {
       id,
       knowledgeBaseId: "base-id",
     })
-    expect(db.documentProcessingJob.updateMany).toHaveBeenCalledWith({
+    expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith({
       where: {
-        documentId: { in: [id] },
-        type: { in: ["PARSE", "REPARSE", "RECHUNK"] },
-        status: { in: ["PENDING", "RUNNING"] },
-      },
-      data: {
-        status: "CANCELLED",
-        lockedAt: null,
-        lockedUntil: null,
-        lockToken: null,
+        documentId: id,
+        type: { not: "CLEANUP" },
       },
     })
     expect(db.documentProcessingJob.createMany).toHaveBeenCalledWith({
       skipDuplicates: true,
       data: [
-        document.storageKey,
-        `knowledge-document-assets/${id}/${assetName}`,
-      ].map((storageKey) =>
+        ...[
+          document.storageKey,
+          `knowledge-document-assets/${id}/${assetName}`,
+        ].map((storageKey) =>
+          expect.objectContaining({
+            type: "CLEANUP",
+            status: "PENDING",
+            payload: { storageKey, documentId: id, reason: "document-delete" },
+          })
+        ),
         expect.objectContaining({
-          type: "CLEANUP",
-          status: "PENDING",
-          payload: { storageKey, documentId: id, reason: "document-delete" },
-        })
-      ),
+          dedupeKey: `cleanup:es:${id}`,
+          payload: {
+            target: "elasticsearch",
+            documentId: id,
+            reason: "document-delete",
+          },
+          availableAt: expect.any(Date),
+        }),
+      ],
     })
-    expect(db.knowledgeDocument.update).toHaveBeenCalledWith({
+    expect(db.knowledgeDocument.delete).toHaveBeenCalledWith({
       where: { id },
-      data: { deletedAt: expect.any(Date), revision: { increment: 1 } },
     })
+    expect(
+      db.documentProcessingJob.createMany.mock.invocationCallOrder[0]
+    ).toBeLessThan(
+      db.documentProcessingJob.deleteMany.mock.invocationCallOrder[0]
+    )
+    expect(
+      db.documentProcessingJob.deleteMany.mock.invocationCallOrder[0]
+    ).toBeLessThan(db.knowledgeDocument.delete.mock.invocationCallOrder[0])
     expect(oss.deleteOssObject).not.toHaveBeenCalled()
   })
 
@@ -381,15 +473,28 @@ describe("knowledge document deletion", () => {
       parseMetadata: null,
     })
     expect((await request("delete")).status).toBe(200)
-    expect(db.documentProcessingJob.createMany).not.toHaveBeenCalled()
+    expect(db.documentProcessingJob.createMany).toHaveBeenCalledWith({
+      skipDuplicates: true,
+      data: [
+        expect.objectContaining({
+          dedupeKey: `cleanup:es:${id}`,
+          payload: {
+            target: "elasticsearch",
+            documentId: id,
+            reason: "document-delete",
+          },
+        }),
+      ],
+    })
   })
 
-  it("fails rather than soft-deleting without a durable cleanup record", async () => {
+  it("fails rather than deleting without a durable cleanup record", async () => {
     db.documentProcessingJob.createMany.mockRejectedValue(
       new Error("database unavailable")
     )
     expect((await request("delete")).status).toBe(500)
-    expect(db.knowledgeDocument.update).not.toHaveBeenCalled()
+    expect(db.knowledgeDocument.delete).not.toHaveBeenCalled()
+    expect(db.documentProcessingJob.deleteMany).not.toHaveBeenCalled()
   })
 })
 
@@ -486,7 +591,6 @@ describe("knowledge tree mutations", () => {
       db.knowledgeDocument.findUniqueOrThrow.mockResolvedValue({
         id,
         title: "新名称",
-        revision: 8,
         knowledgeBaseId: baseId,
       })
       const response = await request("rename", { title: "  新名称  " })
@@ -498,7 +602,7 @@ describe("knowledge tree mutations", () => {
           deletedAt: null,
           knowledgeBase: { userId: "owner", deletedAt: null },
         },
-        data: { title: "新名称", revision: { increment: 1 } },
+        data: { title: "新名称" },
       })
       expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
         db.knowledgeDocument.updateMany.mock.invocationCallOrder[0]
@@ -551,15 +655,14 @@ describe("knowledge tree mutations", () => {
     const { deleted } = await response.json()
     expect(deleted.folderIds).toEqual([folderId, childId])
     expect(deleted.documentIds).toEqual([id])
-    expect(db.knowledgeFolder.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: [folderId, childId] }, deletedAt: null },
-      data: { deletedAt: expect.any(Date) },
+    expect(db.knowledgeFolder.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [folderId, childId] } },
     })
-    expect(db.documentProcessingJob.updateMany).toHaveBeenCalledWith(
+    expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           documentId: { in: [id] },
-          type: { in: ["PARSE", "REPARSE", "RECHUNK"] },
+          type: { not: "CLEANUP" },
         }),
       })
     )
@@ -576,6 +679,13 @@ describe("knowledge tree mutations", () => {
               storageKey: `knowledge-document-assets/${id}/${assetName}`,
             }),
           }),
+          expect.objectContaining({
+            payload: {
+              target: "elasticsearch",
+              documentId: id,
+              reason: "folder-delete",
+            },
+          }),
         ],
       })
     )
@@ -586,20 +696,72 @@ describe("knowledge tree mutations", () => {
     const response = await app.request(`/bases/${baseId}`, { method: "DELETE" })
     expect(response.status).toBe(200)
     expect((await response.json()).deleted.documentIds).toEqual([id])
-    expect(db.knowledgeBase.update).toHaveBeenCalledWith({
+    expect(db.knowledgeBase.delete).toHaveBeenCalledWith({
       where: { id: baseId },
-      data: { deletedAt: expect.any(Date) },
     })
-    expect(db.knowledgeFolder.updateMany).toHaveBeenCalledWith({
-      where: { knowledgeBaseId: baseId, deletedAt: null },
-      data: { deletedAt: expect.any(Date) },
+    expect(db.knowledgeFolder.deleteMany).toHaveBeenCalledWith({
+      where: { knowledgeBaseId: baseId },
     })
-    expect(db.knowledgeDocument.updateMany).toHaveBeenCalledWith({
-      where: { knowledgeBaseId: baseId, deletedAt: null },
-      data: { deletedAt: expect.any(Date), revision: { increment: 1 } },
+    expect(db.knowledgeDocument.deleteMany).toHaveBeenCalledWith({
+      where: { knowledgeBaseId: baseId },
     })
     expect(db.documentProcessingJob.createMany).toHaveBeenCalled()
+    expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith({
+      where: { knowledgeBaseId: baseId, type: { not: "CLEANUP" } },
+    })
+    expect(db.knowledgeDocument.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { knowledgeBaseId: baseId } })
+    )
+    expect(
+      db.knowledgeDocument.deleteMany.mock.invocationCallOrder[0]
+    ).toBeLessThan(db.knowledgeFolder.deleteMany.mock.invocationCallOrder[0])
+    expect(
+      db.knowledgeFolder.deleteMany.mock.invocationCallOrder[0]
+    ).toBeLessThan(db.knowledgeBase.delete.mock.invocationCallOrder[0])
     expect(oss.deleteOssObject).not.toHaveBeenCalled()
+  })
+
+  it.each([`/folders/${folderId}?recursive=true`, `/bases/${baseId}`])(
+    "preserves business records if durable cleanup cannot be registered for %s",
+    async (path) => {
+      db.documentProcessingJob.createMany.mockRejectedValue(
+        new Error("database unavailable")
+      )
+      expect((await app.request(path, { method: "DELETE" })).status).toBe(500)
+      expect(db.documentProcessingJob.deleteMany).not.toHaveBeenCalled()
+      expect(db.knowledgeDocument.deleteMany).not.toHaveBeenCalled()
+      expect(db.knowledgeFolder.deleteMany).not.toHaveBeenCalled()
+      expect(db.knowledgeBase.delete).not.toHaveBeenCalled()
+    }
+  )
+
+  it("includes historical soft-deleted descendants when permanently deleting a folder", async () => {
+    db.knowledgeFolder.findMany
+      .mockResolvedValueOnce([{ id: childId, deletedAt: new Date() }])
+      .mockResolvedValueOnce([])
+    db.knowledgeDocument.findMany.mockResolvedValue([
+      { ...document, deletedAt: new Date() },
+    ])
+    expect(
+      (
+        await app.request(`/folders/${folderId}?recursive=true`, {
+          method: "DELETE",
+        })
+      ).status
+    ).toBe(200)
+    expect(db.knowledgeFolder.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { knowledgeBaseId: baseId, parentId: { in: [folderId] } },
+      })
+    )
+    expect(db.knowledgeDocument.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { folderId: { in: [folderId, childId] } },
+      })
+    )
+    expect(db.knowledgeDocument.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [id] } },
+    })
   })
 
   it.each([`/folders/${folderId}?recursive=true`, `/bases/${baseId}`])(
@@ -626,6 +788,9 @@ describe("knowledge tree mutations", () => {
     ).toBe(404)
     expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
     expect(db.knowledgeBase.update).not.toHaveBeenCalled()
+    expect(db.knowledgeDocument.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeFolder.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeBase.delete).not.toHaveBeenCalled()
   })
 
   it.each([`/folders/${folderId}?recursive=true`, `/bases/${baseId}`])(
@@ -635,8 +800,8 @@ describe("knowledge tree mutations", () => {
         new Error("database unavailable")
       )
       expect((await app.request(path, { method: "DELETE" })).status).toBe(500)
-      expect(db.knowledgeFolder.updateMany).not.toHaveBeenCalled()
-      expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
+      expect(db.knowledgeFolder.deleteMany).not.toHaveBeenCalled()
+      expect(db.knowledgeDocument.deleteMany).not.toHaveBeenCalled()
       expect(db.knowledgeBase.update).not.toHaveBeenCalled()
     }
   )

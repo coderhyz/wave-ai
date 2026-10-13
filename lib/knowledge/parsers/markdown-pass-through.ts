@@ -1,6 +1,6 @@
 /**
  * Markdown 直通解析器。
- * 不重写用户正文，只处理编码、大小检查，并派生纯文本和标题章节。
+ * 不重写用户正文，只处理编码、大小检查，并提取标题章节。
  */
 import {
   assertMarkdownSize,
@@ -10,7 +10,6 @@ import {
 import {
   decodeTextBuffer,
   extractMarkdownSections,
-  markdownToPlainText,
 } from "@/lib/knowledge/parsers/normalize"
 
 export const markdownParser: KnowledgeDocumentParser = {
@@ -28,7 +27,6 @@ export const markdownParser: KnowledgeDocumentParser = {
     assertMarkdownSize(markdown)
     return {
       markdown,
-      plainText: markdownToPlainText(markdown),
       metadata: {
         format: "markdown",
         originalFileName: context.filename,

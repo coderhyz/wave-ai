@@ -4,7 +4,7 @@ import { Streamdown, type UrlTransform } from "streamdown"
 import {
   getKnowledgeAssetUrl,
   isSafeKnowledgeAssetName,
-} from "@/lib/knowledge/assets"
+} from "@/lib/knowledge/documents/assets"
 import { useStreamdownPlugins } from "@/components/ai-elements/use-streamdown-plugins"
 import { MessageCodeBlock } from "@/components/ai-elements/code-block-controls"
 

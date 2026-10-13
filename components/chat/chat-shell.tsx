@@ -2,7 +2,12 @@
 
 import { useCallback, useLayoutEffect } from "react"
 import type { UIMessage } from "ai"
-import { LoaderCircle, MessageCircle, SquareTerminal } from "lucide-react"
+import {
+  LoaderCircle,
+  MessageCircle,
+  Newspaper,
+  SquareTerminal,
+} from "lucide-react"
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion"
 import { ChatComposer } from "@/components/chat/chat-composer"
@@ -33,6 +38,11 @@ const presetPrompts = [
     label: "使用 API 开放平台",
     prompt: "请帮我设计一个接入 AI API 开放平台的实现方案",
     icon: SquareTerminal,
+  },
+  {
+    label: "搜索今日新闻",
+    prompt: "请联网搜索今日国内外重要新闻，简要总结，并注明发布时间和来源链接。",
+    icon: Newspaper,
   },
 ] as const
 
@@ -65,6 +75,7 @@ export function ChatShell({ chatId, loadHistory = false }: ChatShellProps) {
   return (
     <ChatSession
       chatId={chatId}
+      documentId={data?.chat.documentId ?? undefined}
       initialModelId={initialModelId}
       initialMessages={data?.messages ?? []}
       key={chatId}
@@ -76,6 +87,7 @@ interface ChatSessionProps {
   chatId: string
   initialModelId: ChatModelId
   initialMessages: UIMessage[]
+  documentId?: string
 }
 
 /** 聊天页的交互容器，连接 useAiChat、消息列表和输入区。 */
@@ -83,6 +95,7 @@ function ChatSession({
   chatId,
   initialModelId,
   initialMessages,
+  documentId,
 }: ChatSessionProps) {
   /**
    * 每个 selector 只订阅当前组件需要的字段，避免 Store 中其他会话变化时
@@ -121,7 +134,7 @@ function ChatSession({
     regenerate,
     stop,
     clearError,
-  } = useAiChat({ chatId, initialMessages, selectedModelId })
+  } = useAiChat({ chatId, initialMessages, selectedModelId, documentId })
   // 发送文本和附件，清除错误状态
   const handleSubmit = useCallback(
     async ({ text, files }: PromptInputMessage) => {

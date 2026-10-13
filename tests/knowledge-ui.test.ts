@@ -17,7 +17,6 @@ import {
   useKnowledgeDocument,
   useKnowledgeTree,
   useUploadKnowledgeDocument,
-  useSaveKnowledgeDocumentContent,
   KnowledgeRequestError,
   useReparseKnowledgeDocument,
   useDeleteKnowledgeDocument,
@@ -33,13 +32,18 @@ import { OriginalMarkdown } from "@/components/knowledge/preview/original-markdo
 import {
   decodeOriginalText,
   getFilePreviewKind,
-} from "@/lib/knowledge/file-preview"
+} from "@/lib/knowledge/documents/file-preview"
 import { DocumentPreview } from "@/components/knowledge/document/document-preview"
 import { KnowledgeMarkdown } from "@/components/knowledge/document/knowledge-markdown"
-import { reconcileSavedDraft } from "@/components/knowledge/document/document-editor"
 import { KnowledgeDocumentItem } from "@/components/knowledge/tree/knowledge-document-item"
 import { KnowledgeFolderItem } from "@/components/knowledge/tree/knowledge-folder-item"
 import { KnowledgeUploadToolbar } from "@/components/knowledge/workspace/knowledge-upload-toolbar"
+
+// 文档问答作为独立交互组件另测，预览测试只核查入口和就绪状态。
+vi.mock("@/components/knowledge/document/document-chat", () => ({
+  DocumentChat: ({ ready }: { ready: boolean }) =>
+    createElement("div", { "data-document-chat-ready": ready }, "文档问答"),
+}))
 
 // 捕获 Hook 提交的配置，再交给真实 QueryClient/Mutation 执行，无需新增 DOM 测试依赖。
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
@@ -99,9 +103,7 @@ describe("knowledge child components", () => {
           folderId: "folder-id",
           title: "失败文档",
           type: "PDF",
-          source: "UPLOAD",
           status: "FAILED",
-          revision: 1,
           contentRevision: 0,
           chunkStatus: "PENDING",
           createdAt: "2026-10-12T00:00:00Z",
@@ -218,8 +220,8 @@ describe("original file preview", () => {
     ["报告.docx", null, "docx"],
     ["note.md", "text/plain", "markdown"],
     ["note.txt", "text/plain; charset=utf-8", "text"],
-    ["photo.png", null, "image"],
-    ["photo", "image/jpeg", "image"],
+    ["photo.png", null, "unsupported"],
+    ["photo", "image/jpeg", "unsupported"],
     ["drawing.svg", "image/svg+xml", "unsupported"],
     ["data.xlsx", null, "unsupported"],
   ])("selects a preview for %s", (name, mime, kind) => {
@@ -298,7 +300,7 @@ describe("original file preview", () => {
     }
   )
 
-  it("leaves image loading to the browser", async () => {
+  it("treats image originals as unsupported without downloading their bytes", async () => {
     fetchMock.mockResolvedValueOnce(
       Response.json({
         success: true,
@@ -307,7 +309,7 @@ describe("original file preview", () => {
     )
     useKnowledgeFilePreview(documentId)
     expect(await queryClient.fetchQuery(queryOptions())).toMatchObject({
-      kind: "image",
+      kind: "unsupported",
       text: null,
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -370,11 +372,6 @@ describe("original file preview", () => {
   it.each([
     ["text", "# 原样\n  空格\t保留", "<pre"],
     ["unsupported", null, "暂不支持此类型在线预览"],
-    [
-      "image",
-      null,
-      'src="https://oss.example.test/original?signature=temporary"',
-    ],
   ])(
     "renders %s in the same preview shell with download and close controls",
     (kind, text, expected) => {
@@ -390,6 +387,7 @@ describe("original file preview", () => {
       expect(html).toContain(expected)
       expect(html).toContain("下载原件")
       expect(html).toContain("关闭预览")
+      expect(html).not.toContain("<img")
       if (kind === "text") {
         expect(html).toContain("# 原样\n  空格\t保留")
         expect(html).not.toContain("<h1>")
@@ -399,6 +397,26 @@ describe("original file preview", () => {
 })
 
 describe("knowledge query and upload", () => {
+  it.each(["PENDING", "RUNNING", "READY", "FAILED"])(
+    "polls READY document indexing until %s is terminal",
+    async (chunkStatus) => {
+      fetchMock.mockResolvedValueOnce(
+        Response.json({
+          document: { id: documentId, status: "READY", chunkStatus },
+        })
+      )
+      useKnowledgeDocument(documentId)
+      const options = queryOptions()
+      await queryClient.fetchQuery(options)
+      const query = queryClient.getQueryCache().build(queryClient, options)
+      if (typeof options.refetchInterval !== "function")
+        throw new Error("Missing polling configuration")
+      expect(options.refetchInterval(query)).toBe(
+        chunkStatus === "PENDING" || chunkStatus === "RUNNING" ? 3000 : false
+      )
+    }
+  )
+
   it.each(["QUEUED", "PARSING", "READY", "FAILED"])(
     "polls document only while %s is processing",
     async (status) => {
@@ -524,118 +542,6 @@ describe("knowledge query and upload", () => {
   })
 })
 
-describe("knowledge content save client", () => {
-  const json = { markdownContent: "# 新内容", expectedContentRevision: 4 }
-  const saved = {
-    success: true,
-    document: {
-      id: documentId,
-      knowledgeBaseId: "base-id",
-      markdownContent: json.markdownContent,
-      contentRevision: 5,
-    },
-  }
-
-  it("sends the baseline revision and updates detail cache after success", async () => {
-    fetchMock.mockResolvedValueOnce(Response.json(saved))
-    const invalidate = vi.spyOn(queryClient, "invalidateQueries")
-    const cancel = vi.spyOn(queryClient, "cancelQueries")
-    useSaveKnowledgeDocumentContent(documentId)
-    await mutation().execute(json)
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(String(url)).toContain(
-      `/api/knowledge-documents/${documentId}/content`
-    )
-    expect(init?.method).toBe("PATCH")
-    expect(JSON.parse(String(init?.body))).toEqual(json)
-    expect(cancel).toHaveBeenCalledWith({
-      queryKey: ["knowledge-document", documentId],
-    })
-    expect(
-      queryClient.getQueryData(["knowledge-document", documentId])
-    ).toEqual(saved)
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: ["knowledge-tree", "base-id"],
-    })
-  })
-
-  it.each([409, 500])(
-    "preserves cached content and exposes status %s on save failure",
-    async (status) => {
-      const old = {
-        document: { markdownContent: "旧正文", contentRevision: 4 },
-      }
-      queryClient.setQueryData(["knowledge-document", documentId], old)
-      fetchMock.mockResolvedValueOnce(
-        Response.json({ error: { message: "保存未成功" } }, { status })
-      )
-      useSaveKnowledgeDocumentContent(documentId)
-      const error = await mutation()
-        .execute(json)
-        .catch((failure: unknown) => failure)
-      expect(error).toBeInstanceOf(KnowledgeRequestError)
-      expect(error).toMatchObject({ status, message: "保存未成功" })
-      expect(
-        queryClient.getQueryData(["knowledge-document", documentId])
-      ).toEqual(old)
-      expect(fetchMock).toHaveBeenCalledTimes(1)
-    }
-  )
-
-  it("cancels a late detail response instead of allowing it to overwrite the saved version", async () => {
-    let resolveRead: (response: Response) => void = () => {}
-    fetchMock.mockImplementationOnce(
-      () =>
-        new Promise<Response>((resolve) => {
-          resolveRead = resolve
-        })
-    )
-    fetchMock.mockResolvedValueOnce(Response.json(saved))
-    useKnowledgeDocument(documentId)
-    const read = queryClient
-      .fetchQuery(queryOptions())
-      .catch((error: unknown) => error)
-    useSaveKnowledgeDocumentContent(documentId)
-    await mutation().execute(json)
-    resolveRead(
-      Response.json({
-        document: { markdownContent: "迟到的旧正文", contentRevision: 4 },
-      })
-    )
-    await read
-    expect(
-      queryClient.getQueryData(["knowledge-document", documentId])
-    ).toEqual(saved)
-  })
-
-  it("clears only the submitted draft after success", () => {
-    const draft = { ...json, baseContent: "旧正文" }
-    expect(reconcileSavedDraft(draft, json, saved.document)).toBeNull()
-  })
-
-  it("keeps typing made during save and rebases it onto the returned revision", () => {
-    const draft = {
-      ...json,
-      markdownContent: "继续输入",
-      baseContent: "旧正文",
-    }
-    expect(reconcileSavedDraft(draft, json, saved.document)).toEqual({
-      ...draft,
-      baseContent: json.markdownContent,
-      expectedContentRevision: 5,
-    })
-  })
-
-  it("preserves undo back to the original text while a save was pending", () => {
-    const draft = { ...json, markdownContent: "旧正文", baseContent: "旧正文" }
-    expect(reconcileSavedDraft(draft, json, saved.document)).toEqual({
-      ...draft,
-      baseContent: json.markdownContent,
-      expectedContentRevision: 5,
-    })
-  })
-})
-
 describe("knowledge operations client", () => {
   const old = {
     document: {
@@ -653,7 +559,6 @@ describe("knowledge operations client", () => {
       id: documentId,
       knowledgeBaseId: "base-id",
       title: "新的文件名",
-      revision: 8,
     }
     fetchMock.mockResolvedValueOnce(
       Response.json({ success: true, document: metadata })
@@ -952,7 +857,7 @@ describe("knowledge Markdown preview", () => {
 describe("document preview states", () => {
   describe.each(["PDF", "DOCX", "TEXT"])("direct %s preview", (type) => {
     it.each(["QUEUED", "PARSING", "READY", "FAILED"])(
-      "shows the original instead of the Markdown editor while %s",
+      "shows the original independently of parsed Markdown while %s",
       (status) => {
         const extension = type === "TEXT" ? "txt" : type.toLowerCase()
         queryClient.setQueryData(["knowledge-document", documentId], {
@@ -1004,7 +909,7 @@ describe("document preview states", () => {
     )
   })
 
-  it("keeps the selected document in the existing inline editor without a preview dialog", () => {
+  it("renders the selected Markdown document as read-only in the workspace", () => {
     queryClient.setQueryData(["knowledge-bases"], {
       items: [{ id: "base-id", name: "知识库" }],
     })
@@ -1040,9 +945,11 @@ describe("document preview states", () => {
     expect(html).toContain('aria-label="测试目录操作"')
     expect(html).toContain('aria-label="测试文档操作"')
     expect(html).not.toContain("置顶")
-    expect(html).toContain("阅读")
-    expect(html).toContain("编辑")
-    expect(html).toContain("分屏")
+    expect(html).not.toContain("编辑")
+    expect(html).not.toContain("分屏")
+    expect(html).not.toContain("保存正文")
+    expect(html).not.toContain("<textarea")
+    expect(html).not.toContain("正文版本")
     expect(html).toContain("原件预览")
     expect(html).not.toContain('aria-label="原件预览"')
     expect(html).not.toContain('role="dialog"')
@@ -1054,6 +961,7 @@ describe("document preview states", () => {
     ["PARSING", "正在转换为 Markdown"],
     ["FAILED", "MinerU 服务返回错误"],
     ["READY", "解析正文"],
+    ["READY", "文档正文为空"],
   ])("renders %s without exposing unfinished content", (status, expected) => {
     useKnowledgeDocument(documentId)
     const options = queryOptions()
@@ -1063,7 +971,7 @@ describe("document preview states", () => {
         title: "测试文档",
         type: "MARKDOWN",
         status,
-        markdownContent: "# 解析正文",
+        markdownContent: expected === "文档正文为空" ? "" : "# 解析正文",
         parseErrorMessage: "MinerU 服务返回错误",
       },
     })

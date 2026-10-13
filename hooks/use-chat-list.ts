@@ -23,13 +23,14 @@ interface ChatListResponse {
   nextCursor: string | null
 }
 
-interface ChatDetailResponse {
+export interface ChatDetailResponse {
   success: true
   messages: UIMessage[]
   chat: {
     id: string
     title: string
     modelId: string | null
+    documentId: string | null
     isPinned: boolean
     pinnedAt: string | null
     createdAt: string

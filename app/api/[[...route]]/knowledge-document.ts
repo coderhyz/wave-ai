@@ -1,6 +1,6 @@
 /**
  * 知识库文档接口。
- * 提供文档详情、正文保存、原件下载、重解析及删除，统一验证资源所有权。
+ * 提供文档详情、只读预览、原件下载、重解析及删除，统一验证资源所有权。
  */
 import { zValidator } from "@hono/zod-validator"
 import { Hono } from "hono"
@@ -9,17 +9,15 @@ import { getAuthUser } from "@/lib/hono/hono-middware"
 import {
   getOwnedKnowledgeDocument,
   readOwnedKnowledgeDocumentAsset,
-  saveKnowledgeDocumentContent,
   readOwnedKnowledgeDocumentOriginal,
   reparseKnowledgeDocument,
   getOwnedKnowledgeFilePreview,
   renameKnowledgeDocument,
-} from "@/lib/knowledge/document-service"
-import { deleteKnowledgeDocument } from "@/lib/knowledge/service"
+} from "@/lib/knowledge/documents/document-service"
+import { deleteKnowledgeDocument } from "@/lib/knowledge/management/service"
 import { runKnowledgeApi } from "@/lib/knowledge/errors"
 import {
   knowledgeIdParamSchema,
-  saveKnowledgeDocumentContentSchema,
   reparseKnowledgeDocumentSchema,
   renameKnowledgeDocumentSchema,
 } from "@/lib/knowledge/schemas"
@@ -34,7 +32,7 @@ const knowledgeAssetParamSchema = z
 
 /** 文档详情和解析图片都经过知识库所有权校验，不暴露 OSS storageKey。 */
 export const knowledgeDocumentRoute = new Hono()
-  /** 文件显示名称是元数据，与正文保存及原件存储相互独立。 */
+  /** 文件显示名称是元数据，与解析正文及原件存储相互独立。 */
   .patch(
     "/:id",
     getAuthUser,
@@ -118,24 +116,6 @@ export const knowledgeDocumentRoute = new Hono()
           c.req.valid("param").id
         )
         return c.json({ success: true, ...deleted })
-      })
-  )
-  /** 请求正文仅在入口校验一次，服务层通过事务和版本条件保证一致性。 */
-  .patch(
-    "/:id/content",
-    getAuthUser,
-    zValidator("param", knowledgeIdParamSchema),
-    zValidator("json", saveKnowledgeDocumentContentSchema),
-    async (c) =>
-      runKnowledgeApi(async () => {
-        const user = c.get("user")
-        const { id } = c.req.valid("param")
-        const document = await saveKnowledgeDocumentContent(
-          user.id,
-          id,
-          c.req.valid("json")
-        )
-        return c.json({ success: true, document })
       })
   )
   .get(

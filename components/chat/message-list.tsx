@@ -12,6 +12,11 @@ import {
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation"
 import { Attachments } from "@/components/ai-elements/attachments"
+import { KnowledgeCitations } from "@/components/chat/knowledge-citations"
+import {
+  formatKnowledgeCitationText,
+  getKnowledgeCitations,
+} from "@/lib/chat/citations"
 import { ChatAttachment } from "@/components/chat/attachment-preview"
 import { ModelBrandIcon } from "@/components/chat/model-brand-icon"
 import {
@@ -59,7 +64,9 @@ const estimateMessageHeight = (message?: UIMessage) => {
   /** 助手消息包含操作栏和模型信息，因此基础高度略大。 */
   const baseHeight = message.role === "user" ? 96 : 150
 
-  return baseHeight + textHeight + reasoningHeight + attachmentHeight + codeHeight
+  return (
+    baseHeight + textHeight + reasoningHeight + attachmentHeight + codeHeight
+  )
 }
 
 interface ChatMessageMetadata {
@@ -159,7 +166,14 @@ const ChatMessage = memo(function ChatMessage({
     isStreaming &&
     (lastPart?.type === "reasoning" ||
       reasoningParts.some((part) => part.state === "streaming"))
-  const text = textParts.map((part) => part.text).join("\n")
+  const citations = getKnowledgeCitations(message)
+  const text = textParts
+    .map((part) =>
+      message.role === "assistant"
+        ? formatKnowledgeCitationText(part.text, citations)
+        : part.text
+    )
+    .join("\n")
   const metadata = getMessageMetadata(message)
 
   /**
@@ -257,7 +271,7 @@ const ChatMessage = memo(function ChatMessage({
         {textParts.map((part, index) =>
           message.role === "assistant" ? (
             <MessageResponse key={`${message.id}-${index}`}>
-              {part.text}
+              {formatKnowledgeCitationText(part.text, citations)}
             </MessageResponse>
           ) : (
             <p
@@ -268,6 +282,7 @@ const ChatMessage = memo(function ChatMessage({
             </p>
           )
         )}
+        <KnowledgeCitations message={message} />
       </MessageContent>
       <MessageActions
         className={
@@ -396,8 +411,7 @@ export function MessageList({
      * 从未访问过的会话直接定位到底部；访问过的会话恢复离开时的位置。
      */
     /** 直接读取快照，不订阅 chats，滚动写入不会导致列表重渲染。 */
-    const savedScrollTop =
-      useChatUiStore.getState().chats[chatId]?.scrollTop
+    const savedScrollTop = useChatUiStore.getState().chats[chatId]?.scrollTop
     if (savedScrollTop === undefined) {
       void scrollToBottom({ animation: "instant" })
     } else {
@@ -409,9 +423,7 @@ export function MessageList({
       if (scrollSaveTimer.current !== null) return
       scrollSaveTimer.current = window.setTimeout(() => {
         scrollSaveTimer.current = null
-        useChatUiStore
-          .getState()
-          .setScrollTop(chatId, scrollElement.scrollTop)
+        useChatUiStore.getState().setScrollTop(chatId, scrollElement.scrollTop)
       }, 150)
     }
 

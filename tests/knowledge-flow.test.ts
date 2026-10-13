@@ -2,17 +2,19 @@
 import { createHash } from "node:crypto"
 import { HTTPException } from "hono/http-exception"
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest"
-import { createKnowledgeDocumentUpload } from "@/lib/knowledge/document-service"
+import { createKnowledgeDocumentUpload } from "@/lib/knowledge/documents/document-service"
 import {
   knowledgeBaseNotFound,
   knowledgeFolderNotEmpty,
   runKnowledgeApi,
 } from "@/lib/knowledge/errors"
 import { processNextDocumentJob } from "@/lib/knowledge/jobs/processor"
+import { MAX_DOCUMENT_PARSE_TIME_MS } from "@/lib/knowledge/jobs/lease"
+import * as parserRegistry from "@/lib/knowledge/parsers/registry"
 import { KnowledgeParseError } from "@/lib/knowledge/parsers/types"
-import { deleteKnowledgeFolder } from "@/lib/knowledge/service"
+import { deleteKnowledgeFolder } from "@/lib/knowledge/management/service"
 
-const { db, oss } = vi.hoisted(() => ({
+const { db, oss, es } = vi.hoisted(() => ({
   db: {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
@@ -21,18 +23,21 @@ const { db, oss } = vi.hoisted(() => ({
       findFirst: vi.fn(),
       findMany: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
     knowledgeDocument: {
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
     documentProcessingJob: {
       create: vi.fn(),
       createMany: vi.fn(),
       findFirst: vi.fn(),
       updateMany: vi.fn(),
+      deleteMany: vi.fn(),
     },
   },
   oss: {
@@ -40,11 +45,13 @@ const { db, oss } = vi.hoisted(() => ({
     getOssObject: vi.fn(),
     deleteOssObject: vi.fn(),
   },
+  es: { deleteKnowledgeChunks: vi.fn(), indexKnowledgeChunks: vi.fn() },
 }))
 
 vi.mock("server-only", () => ({}))
 vi.mock("@/lib/prisma", () => ({ default: db }))
 vi.mock("@/lib/storage/oss", () => oss)
+vi.mock("@/lib/es/knowledge-index", () => es)
 
 const source = Buffer.from("# 文档\n\n正文")
 const document = {
@@ -58,6 +65,7 @@ const document = {
   sizeBytes: source.byteLength,
   checksumSha256: createHash("sha256").update(source).digest("hex"),
   parseMetadata: null,
+  contentRevision: 0,
 }
 const job = {
   id: "job-id",
@@ -68,6 +76,7 @@ const job = {
   attempts: 0,
   maxAttempts: 3,
   lockedUntil: null,
+  targetRevision: 0,
 }
 const upload = {
   userId: "owner",
@@ -80,6 +89,7 @@ const upload = {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  es.deleteKnowledgeChunks.mockResolvedValue(undefined)
   vi.spyOn(console, "error").mockImplementation(() => {})
   db.$transaction.mockImplementation((callback) => callback(db))
   db.knowledgeBase.findFirst.mockResolvedValue({ id: upload.knowledgeBaseId })
@@ -89,10 +99,12 @@ beforeEach(() => {
   })
   db.knowledgeFolder.findMany.mockResolvedValue([])
   db.knowledgeFolder.updateMany.mockResolvedValue({ count: 1 })
+  db.knowledgeFolder.deleteMany.mockResolvedValue({ count: 1 })
   db.knowledgeDocument.create.mockResolvedValue(document)
   db.knowledgeDocument.findFirst.mockResolvedValue(document)
   db.knowledgeDocument.findMany.mockResolvedValue([])
   db.knowledgeDocument.updateMany.mockResolvedValue({ count: 1 })
+  db.knowledgeDocument.deleteMany.mockResolvedValue({ count: 0 })
   db.documentProcessingJob.findFirst.mockResolvedValue(job)
   db.documentProcessingJob.updateMany.mockResolvedValue({ count: 1 })
   oss.putOssObject.mockResolvedValue(undefined)
@@ -100,7 +112,10 @@ beforeEach(() => {
   oss.deleteOssObject.mockResolvedValue(undefined)
 })
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
 
 describe("knowledge API error contract", () => {
   it.each([
@@ -175,10 +190,29 @@ describe("knowledge upload", () => {
     )
     expect(db.documentProcessingJob.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ type: "PARSE", status: "PENDING" }),
+        data: expect.objectContaining({
+          type: "PARSE",
+          status: "PENDING",
+          payload: {},
+        }),
       })
     )
     expect(oss.deleteOssObject).not.toHaveBeenCalled()
+  })
+
+  it("locks the base before committing an upload and recovers the original if the base was deleted", async () => {
+    db.$queryRaw.mockImplementationOnce(() => {
+      db.knowledgeBase.findFirst.mockResolvedValue(null)
+    })
+    await expect(createKnowledgeDocumentUpload(upload)).rejects.toMatchObject({
+      code: "KNOWLEDGE_BASE_NOT_FOUND",
+    })
+    expect(oss.putOssObject).toHaveBeenCalledOnce()
+    expect(db.knowledgeDocument.create).not.toHaveBeenCalled()
+    expect(db.documentProcessingJob.create).not.toHaveBeenCalled()
+    expect(oss.deleteOssObject).toHaveBeenCalledWith(
+      expect.stringMatching(/^knowledge-documents\//)
+    )
   })
 
   it("rejects inaccessible knowledge bases before writing to OSS", async () => {
@@ -188,6 +222,27 @@ describe("knowledge upload", () => {
     })
     expect(oss.putOssObject).not.toHaveBeenCalled()
     expect(db.knowledgeDocument.create).not.toHaveBeenCalled()
+  })
+
+  it("keeps a detached cleanup task if recovering an uncommitted upload fails", async () => {
+    db.$queryRaw.mockImplementationOnce(() => {
+      db.knowledgeBase.findFirst.mockResolvedValue(null)
+    })
+    oss.deleteOssObject.mockRejectedValue(new Error("OSS unavailable"))
+    await expect(createKnowledgeDocumentUpload(upload)).rejects.toMatchObject({
+      code: "KNOWLEDGE_BASE_NOT_FOUND",
+    })
+    expect(db.documentProcessingJob.create).toHaveBeenCalledWith({
+      data: {
+        type: "CLEANUP",
+        dedupeKey: expect.stringMatching(/^cleanup:/),
+        payload: {
+          storageKey: oss.putOssObject.mock.calls[0][0],
+          documentId: expect.any(String),
+          reason: "upload-failed",
+        },
+      },
+    })
   })
 
   it("rechecks ownership after OSS upload and rolls back if the base was deleted", async () => {
@@ -215,6 +270,121 @@ describe("knowledge upload", () => {
 })
 
 describe("knowledge document jobs", () => {
+  it("durably cleans images uploaded before the base and task were physically deleted", async () => {
+    vi.spyOn(parserRegistry, "getKnowledgeParser").mockReturnValue({
+      kind: "markdown",
+      version: "test@1",
+      async parse(_input, context) {
+        await context.uploadAsset?.({
+          data: Buffer.from("image"),
+          mediaType: "image/png",
+        })
+        db.knowledgeBase.findFirst.mockResolvedValue(null)
+        db.documentProcessingJob.updateMany.mockResolvedValue({ count: 0 })
+        return {
+          markdown: "![图片](image.png)",
+          metadata: {},
+          sections: [],
+          warnings: [],
+        }
+      },
+    })
+    await processNextDocumentJob()
+    expect(db.documentProcessingJob.createMany).toHaveBeenCalledWith({
+      skipDuplicates: true,
+      data: [
+        {
+          type: "CLEANUP",
+          dedupeKey: `cleanup:${document.id}:${job.id}-0001.png`,
+          payload: {
+            storageKey: `knowledge-document-assets/${document.id}/${job.id}-0001.png`,
+            documentId: document.id,
+            reason: "parse-failed",
+          },
+        },
+      ],
+    })
+    expect(db.knowledgeDocument.updateMany).toHaveBeenCalledTimes(1)
+    expect(oss.deleteOssObject).not.toHaveBeenCalled()
+  })
+
+  it("registers cleanup for an in-flight image upload that completes after parsing times out", async () => {
+    vi.useFakeTimers()
+    let completeUpload = () => {}
+    oss.putOssObject.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          completeUpload = resolve
+        })
+    )
+    vi.spyOn(parserRegistry, "getKnowledgeParser").mockReturnValue({
+      kind: "markdown",
+      version: "test@1",
+      async parse(_input, context) {
+        await context.uploadAsset?.({
+          data: Buffer.from("image"),
+          mediaType: "image/png",
+        })
+        return { markdown: "image", metadata: {}, sections: [], warnings: [] }
+      },
+    })
+    const processing = processNextDocumentJob()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(oss.putOssObject).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(MAX_DOCUMENT_PARSE_TIME_MS)
+    await processing
+    expect(db.documentProcessingJob.createMany).not.toHaveBeenCalled()
+    completeUpload()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(db.documentProcessingJob.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            payload: expect.objectContaining({ reason: "parse-failed" }),
+          }),
+        ],
+      })
+    )
+    expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "READY" }),
+      })
+    )
+  })
+
+  it.each([false, true])(
+    "cleans ES through the durable queue (failure: %s)",
+    async (fails) => {
+      db.documentProcessingJob.findFirst.mockResolvedValue({
+        ...job,
+        type: "CLEANUP",
+        documentId: null,
+        payload: { target: "elasticsearch", documentId: document.id },
+      })
+      if (fails)
+        es.deleteKnowledgeChunks.mockRejectedValue(new Error("ES unavailable"))
+      await processNextDocumentJob()
+      expect(es.deleteKnowledgeChunks).toHaveBeenCalledWith(document.id)
+      expect(oss.deleteOssObject).not.toHaveBeenCalled()
+      expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
+      if (fails) {
+        expect(db.documentProcessingJob.deleteMany).not.toHaveBeenCalled()
+        expect(db.documentProcessingJob.updateMany).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ status: "PENDING" }),
+          })
+        )
+      } else {
+        expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith({
+          where: {
+            id: job.id,
+            status: "RUNNING",
+            lockToken: expect.any(String),
+          },
+        })
+      }
+    }
+  )
   it("reparse replaces the body, advances its revision, and durably queues old image cleanup", async () => {
     const assetName = "20000000-0000-4000-8000-000000000002-0001.png"
     db.documentProcessingJob.findFirst.mockResolvedValue({
@@ -232,12 +402,11 @@ describe("knowledge document jobs", () => {
       db.knowledgeDocument.updateMany.mock.invocationCallOrder[1]
     )
     expect(db.knowledgeDocument.updateMany).toHaveBeenCalledWith({
-      where: { id: document.id, deletedAt: null },
+      where: { id: document.id, deletedAt: null, contentRevision: 0 },
       data: expect.objectContaining({
         status: "READY",
         markdownContent: source.toString(),
         contentRevision: { increment: 1 },
-        revision: { increment: 1 },
         chunkStatus: "PENDING",
         chunkedContentRevision: null,
       }),
@@ -284,27 +453,35 @@ describe("knowledge document jobs", () => {
         oss.deleteOssObject.mockRejectedValue(new Error("OSS unavailable"))
       await processNextDocumentJob()
       expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
-      expect(db.documentProcessingJob.updateMany).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            status: failure ? "PENDING" : "SUCCEEDED",
-          }),
+      if (failure) {
+        expect(db.documentProcessingJob.deleteMany).not.toHaveBeenCalled()
+        expect(db.documentProcessingJob.updateMany).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ status: "PENDING" }),
+          })
+        )
+      } else {
+        expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith({
+          where: {
+            id: job.id,
+            status: "RUNNING",
+            lockToken: expect.any(String),
+          },
         })
-      )
+      }
     }
   )
 
   it("commits parsed content and job success", async () => {
     await expect(processNextDocumentJob()).resolves.toBe(true)
     expect(db.knowledgeDocument.updateMany).toHaveBeenCalledWith({
-      where: { id: document.id, deletedAt: null },
+      where: { id: document.id, deletedAt: null, contentRevision: 0 },
       data: expect.objectContaining({
         status: "READY",
         markdownContent: source.toString(),
-        plainText: "文档\n\n正文",
       }),
     })
-    expect(db.documentProcessingJob.updateMany).toHaveBeenLastCalledWith({
+    expect(db.documentProcessingJob.updateMany).toHaveBeenCalledWith({
       where: { id: job.id, status: "RUNNING", lockToken: expect.any(String) },
       data: {
         status: "SUCCEEDED",
@@ -313,6 +490,16 @@ describe("knowledge document jobs", () => {
         lockToken: null,
         lastError: null,
       },
+    })
+    expect(db.documentProcessingJob.createMany).toHaveBeenCalledWith({
+      skipDuplicates: true,
+      data: [
+        expect.objectContaining({
+          type: "RECHUNK",
+          targetRevision: 1,
+          dedupeKey: `rechunk:${document.id}:1`,
+        }),
+      ],
     })
   })
 
@@ -377,7 +564,7 @@ describe("knowledge document jobs", () => {
     expect(db.knowledgeDocument.updateMany).toHaveBeenCalledTimes(1)
   })
 
-  it("deletes the cleanup object before marking the task successful", async () => {
+  it("deletes the cleanup object before removing its detached task", async () => {
     db.documentProcessingJob.findFirst.mockResolvedValue({
       ...job,
       type: "CLEANUP",
@@ -386,10 +573,11 @@ describe("knowledge document jobs", () => {
     })
     await processNextDocumentJob()
     expect(oss.deleteOssObject).toHaveBeenCalledWith(document.storageKey)
-    expect(db.documentProcessingJob.updateMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ status: "SUCCEEDED" }),
-      })
+    expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith({
+      where: { id: job.id, status: "RUNNING", lockToken: expect.any(String) },
+    })
+    expect(oss.deleteOssObject.mock.invocationCallOrder[0]).toBeLessThan(
+      db.documentProcessingJob.deleteMany.mock.invocationCallOrder[0]
     )
   })
 
@@ -412,7 +600,7 @@ describe("knowledge document jobs", () => {
 
 describe("knowledge folder deletion", () => {
   it("allows deleting an empty folder with zero child folders", async () => {
-    db.knowledgeDocument.updateMany.mockResolvedValue({ count: 0 })
+    db.knowledgeDocument.deleteMany.mockResolvedValue({ count: 0 })
     await expect(
       deleteKnowledgeFolder(upload.userId, upload.folderId, false)
     ).resolves.toMatchObject({
@@ -435,27 +623,20 @@ describe("knowledge folder deletion", () => {
       status: 409,
       details: { folderCount: 1, documentCount: 0 },
     })
-    expect(db.knowledgeFolder.updateMany).not.toHaveBeenCalled()
-    expect(db.knowledgeDocument.updateMany).not.toHaveBeenCalled()
+    expect(db.knowledgeFolder.deleteMany).not.toHaveBeenCalled()
+    expect(db.knowledgeDocument.deleteMany).not.toHaveBeenCalled()
   })
 
-  it("cancels parsing and registers original-file cleanup during recursive deletion", async () => {
+  it("removes processing jobs and registers original-file cleanup during recursive deletion", async () => {
     db.knowledgeDocument.findMany.mockResolvedValue([
       { ...document, knowledgeBaseId: upload.knowledgeBaseId },
     ])
     await deleteKnowledgeFolder(upload.userId, upload.folderId, true)
-    expect(db.documentProcessingJob.updateMany).toHaveBeenCalledWith(
+    expect(db.documentProcessingJob.deleteMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
           documentId: { in: [document.id] },
-          type: { in: ["PARSE", "REPARSE", "RECHUNK"] },
-          status: { in: ["PENDING", "RUNNING"] },
-        },
-        data: {
-          status: "CANCELLED",
-          lockedAt: null,
-          lockedUntil: null,
-          lockToken: null,
+          type: { not: "CLEANUP" },
         },
       })
     )
@@ -471,11 +652,20 @@ describe("knowledge folder deletion", () => {
             reason: "folder-delete",
           },
         }),
+        expect.objectContaining({
+          type: "CLEANUP",
+          dedupeKey: `cleanup:es:${document.id}`,
+          availableAt: expect.any(Date),
+          payload: {
+            target: "elasticsearch",
+            documentId: document.id,
+            reason: "folder-delete",
+          },
+        }),
       ],
     })
-    expect(db.knowledgeDocument.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: [document.id] }, deletedAt: null },
-      data: { deletedAt: expect.any(Date), revision: { increment: 1 } },
+    expect(db.knowledgeDocument.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: [document.id] } },
     })
     expect(oss.deleteOssObject).not.toHaveBeenCalled()
   })

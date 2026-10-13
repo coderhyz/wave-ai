@@ -6,13 +6,13 @@ import { api, fetchWithAuth } from "@/lib/hono/hono-rpc"
 import {
   decodeOriginalText,
   getFilePreviewKind,
-} from "@/lib/knowledge/file-preview"
+} from "@/lib/knowledge/documents/file-preview"
 
 const bases = api["knowledge-bases"]
 const documents = api["knowledge-documents"]
 const folders = api["knowledge-folders"]
 
-/** 标题更新只合并元数据，不能用部分响应覆盖正文或本地编辑基准。 */
+/** 标题更新只合并元数据，不能用部分响应覆盖解析正文。 */
 export function useRenameKnowledgeDocument(documentId: string) {
   const queryClient = useQueryClient()
   return useMutation({
@@ -85,7 +85,7 @@ export function useDeleteKnowledgeFolder(
     },
     retry: false,
     onSuccess: async ({ deleted }) => {
-      // 使用服务端实际删除的 ID，不能清空其他目录的详情，否则会影响它们的编辑草稿。
+      // 使用服务端实际删除的 ID，保留其他目录的详情缓存。
       await Promise.all(
         deleted.documentIds.map(async (id) => {
           await queryClient.cancelQueries({
@@ -202,7 +202,7 @@ export type KnowledgeDocument = InferResponseType<
 >["document"]
 
 // 领域错误返回 JSON，HTTPException 也可能返回纯文本；两者都应显示真实原因。
-// 保留 HTTP 状态，编辑器才能区分冲突和可手动重试的网络/服务器错误。
+// 保留 HTTP 状态，文档操作才能区分版本冲突和网络/服务器错误。
 export class KnowledgeRequestError extends Error {
   constructor(
     message: string,
@@ -226,36 +226,6 @@ async function throwRequestError(response: Response): Promise<never> {
     (await response.text()) || `请求失败（${response.status}）`,
     response.status
   )
-}
-
-/** 保存成功以服务端版本为准；先取消旧读取，避免迟到的响应覆盖新正文。 */
-export function useSaveKnowledgeDocumentContent(documentId: string) {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async (
-      json: InferRequestType<
-        (typeof documents)[":id"]["content"]["$patch"]
-      >["json"]
-    ) => {
-      const response = await documents[":id"].content.$patch({
-        param: { id: documentId },
-        json,
-      })
-      if (!response.ok) await throwRequestError(response)
-      return response.json()
-    },
-    retry: false,
-    onSuccess: async (data) => {
-      await queryClient.cancelQueries({
-        queryKey: ["knowledge-document", documentId],
-      })
-      queryClient.setQueryData(["knowledge-document", documentId], data)
-      queryClient.invalidateQueries({
-        queryKey: ["knowledge-tree", data.document.knowledgeBaseId],
-      })
-      queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] })
-    },
-  })
 }
 
 /** 重解析入队后继续沿用详情轮询；不乐观地伪造解析成功。 */
@@ -395,7 +365,12 @@ export function useKnowledgeDocument(documentId: string) {
     // 复用详情接口读取任务状态，不另建状态 API 或定时器。
     refetchInterval: (query) => {
       const status = query.state.data?.document.status
-      return !query.state.error && (status === "QUEUED" || status === "PARSING")
+      const chunkStatus = query.state.data?.document.chunkStatus
+      return !query.state.error &&
+        (status === "QUEUED" ||
+          status === "PARSING" ||
+          (status === "READY" &&
+            (chunkStatus === "PENDING" || chunkStatus === "RUNNING")))
         ? 3000
         : false
     },

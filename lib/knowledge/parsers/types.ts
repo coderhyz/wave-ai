@@ -33,7 +33,6 @@ export interface ParsedSection {
 /** 所有解析器都必须返回的统一结果。 */
 export interface ParsedMarkdownDocument {
   markdown: string
-  plainText: string
   metadata: Record<string, unknown>
   sections: ParsedSection[]
   warnings: string[]

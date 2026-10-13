@@ -35,11 +35,13 @@ export const incomingUserMessageSchema = z
 export const sendChatMessageSchema = z.object({
   /** 会话 UUID；新会话可以由客户端提前生成。 */
   id: z.string().uuid(),
+  /** 文档预览问答的固定范围；普通聊天省略。 */
+  documentId: z.string().uuid().optional(),
   /** 本轮需要发送给模型的用户消息。 */
   message: incomingUserMessageSchema,
   /** 只能选择服务端模型白名单中存在的模型。 */
   selectedModelId: z.enum(CHAT_MODEL_IDS),
-  /** 工具调用的预留字段；当前文本对话阶段应传 null。 */
+  /** 额外工具选择的预留字段；默认知识库检索无需选择，应传 null。 */
   selectedToolName: z.string().trim().min(1).max(50).nullable().default(null),
   /** 区分发送新消息和重新生成已有回复。 */
   trigger: z

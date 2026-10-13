@@ -20,22 +20,18 @@ export function KnowledgeBaseWorkspace({
   documentId,
   onSelect,
   upload,
-  onLeaveGuardChange,
   onDeleted,
   onSelectionDeleted,
   onKnowledgeBaseDeleted,
-  canLeaveDocument,
 }: {
   knowledgeBaseId: string
   folderId: string | null
   documentId: string
-  onSelect: (folderId: string | null, documentId: string) => boolean
+  onSelect: (folderId: string | null, documentId: string) => void
   upload: ReturnType<typeof useUploadKnowledgeDocument>
-  onLeaveGuardChange: (guard: () => boolean) => void
   onDeleted: () => void
   onSelectionDeleted: (clearFolder: boolean) => void
   onKnowledgeBaseDeleted: () => void
-  canLeaveDocument: () => boolean
 }) {
   const tree = useKnowledgeTree(knowledgeBaseId)
   const createFolder = useCreateKnowledgeFolder(knowledgeBaseId)
@@ -47,7 +43,8 @@ export function KnowledgeBaseWorkspace({
       : tree.data?.folders.find((folder) => folder.id === folderId)?.name
   function selectDocument(id: string, folder: string | null) {
     // 文档组件按类型直接预览；清除 MD 手动打开的原件视图，避免切文件后残留。
-    if (onSelect(folder, id)) setPreviewDocumentId("")
+    onSelect(folder, id)
+    setPreviewDocumentId("")
   }
   return (
     <div className="grid min-h-0 flex-1 grid-rows-[minmax(180px,35%)_1fr] overflow-hidden rounded-xl border bg-background md:grid-cols-[280px_minmax(0,1fr)] md:grid-rows-1">
@@ -89,13 +86,12 @@ export function KnowledgeBaseWorkspace({
               selectedFolderId={folderId}
               selectedDocumentId={documentId}
               onSelectFolder={(id) => {
-                if (onSelect(id, "")) setPreviewDocumentId("")
+                onSelect(id, "")
+                setPreviewDocumentId("")
               }}
               onSelectDocument={selectDocument}
-              canLeaveDocument={canLeaveDocument}
               onSelectionDeleted={(clearFolder) => {
                 setPreviewDocumentId("")
-                // 删除前已检查草稿，成功后直接清空选择，不再次触发离开确认。
                 onSelectionDeleted(clearFolder)
               }}
               onKnowledgeBaseDeleted={onKnowledgeBaseDeleted}
@@ -104,21 +100,18 @@ export function KnowledgeBaseWorkspace({
         </div>
       </aside>
       <div className="min-h-0 min-w-0">
-        {/* 只隐藏正文，不卸载编辑器，避免查看原件时丢失未保存的输入。 */}
-        <div hidden={Boolean(previewDocumentId)} className="h-full min-h-0">
-          <DocumentPreview
-            key={documentId}
-            documentId={documentId}
-            onLeaveGuardChange={onLeaveGuardChange}
-            onDeleted={onDeleted}
-            onPreviewOriginal={() => setPreviewDocumentId(documentId)}
-          />
-        </div>
-        {previewDocumentId && (
+        {previewDocumentId ? (
           <FilePreview
             key={previewDocumentId}
             documentId={previewDocumentId}
             onClose={() => setPreviewDocumentId("")}
+          />
+        ) : (
+          <DocumentPreview
+            key={documentId}
+            documentId={documentId}
+            onDeleted={onDeleted}
+            onPreviewOriginal={() => setPreviewDocumentId(documentId)}
           />
         )}
       </div>

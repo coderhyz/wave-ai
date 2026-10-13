@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/dialog"
 import type { TreeItem } from "./knowledge-item-menu"
 
-/** 删除范围必须明确展示；这里只负责确认，真正的删除与草稿守卫仍由父组件执行。 */
+/** 删除范围必须明确展示；这里只负责确认，真正的删除由父组件执行。 */
 export function KnowledgeDeleteDialog({
   open,
   item,

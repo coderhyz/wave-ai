@@ -10,7 +10,6 @@ import {
 } from "@/lib/knowledge/parsers/types"
 import {
   decodeTextBuffer,
-  markdownToPlainText,
   plainTextToMarkdown,
   titleFromFilename,
 } from "@/lib/knowledge/parsers/normalize"
@@ -48,7 +47,6 @@ export const txtParser: KnowledgeDocumentParser = {
 
     return {
       markdown,
-      plainText: markdownToPlainText(markdown),
       metadata: {
         format: "text",
         originalFileName: context.filename,

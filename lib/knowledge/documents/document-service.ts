@@ -3,7 +3,7 @@ import "server-only"
 /**
  * 知识库文档服务。
  *
- * 负责文件上传、解析任务入队、正文保存、原件下载和解析资源读取。
+ * 负责文件上传、解析任务入队、原件下载和解析正文及资源读取。
  * HTTP 接口只做参数校验，具体业务流程集中在这里，方便复用和测试。
  */
 
@@ -14,7 +14,7 @@ import {
   getKnowledgeAssetMediaType,
   getKnowledgeAssetStorageKey,
   isSafeKnowledgeAssetName,
-} from "@/lib/knowledge/assets"
+} from "@/lib/knowledge/documents/assets"
 import {
   KnowledgeError,
   knowledgeDocumentNotFound,
@@ -25,18 +25,12 @@ import {
   lockOwnedKnowledgeBase,
 } from "@/lib/knowledge/ownership"
 import { inspectKnowledgeFile } from "@/lib/knowledge/parsers/registry"
-import {
-  extractMarkdownSections,
-  markdownToPlainText,
-  normalizeText,
-  titleFromFilename,
-} from "@/lib/knowledge/parsers/normalize"
+import { titleFromFilename } from "@/lib/knowledge/parsers/normalize"
 import type {
-  SaveKnowledgeDocumentContentInput,
   ReparseKnowledgeDocumentInput,
   RenameKnowledgeDocumentInput,
 } from "@/lib/knowledge/schemas"
-import { cancelDocumentJobs } from "@/lib/knowledge/service"
+import { cancelDocumentJobs } from "@/lib/knowledge/management/service"
 import {
   deleteOssObject,
   getOssObject,
@@ -51,15 +45,12 @@ const documentDetailSelect = {
   folderId: true,
   title: true,
   type: true,
-  source: true,
   status: true,
   originalFileName: true,
   mimeType: true,
   sizeBytes: true,
   checksumSha256: true,
   markdownContent: true,
-  plainText: true,
-  revision: true,
   contentRevision: true,
   parserVersion: true,
   parseMetadata: true,
@@ -67,6 +58,8 @@ const documentDetailSelect = {
   parseErrorMessage: true,
   parsedAt: true,
   chunkStatus: true,
+  chunkedContentRevision: true,
+  chunkErrorMessage: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.KnowledgeDocumentSelect
@@ -124,7 +117,8 @@ export const createKnowledgeDocumentUpload = async ({
   await putOssObject(storageKey, buffer, inspected.mimeType)
   try {
     return await prisma.$transaction(async (db) => {
-      await requireOwnedKnowledgeBase(db, userId, knowledgeBaseId)
+      // 与整库/目录删除串行，保证删除时能读到新文档的资源信息。
+      await lockOwnedKnowledgeBase(db, userId, knowledgeBaseId)
       if (folderId)
         await requireFolderInKnowledgeBase(db, knowledgeBaseId, folderId)
 
@@ -136,7 +130,6 @@ export const createKnowledgeDocumentUpload = async ({
           folderId,
           title: titleFromFilename(originalFileName),
           type: inspected.documentType,
-          source: "UPLOAD",
           status: "QUEUED",
           originalFileName,
           mimeType: inspected.mimeType,
@@ -155,22 +148,22 @@ export const createKnowledgeDocumentUpload = async ({
           status: "PENDING",
           targetRevision: 0,
           dedupeKey: `parse:${id}:${checksumSha256}`,
-          payload: {
-            storageKey,
-            checksumSha256,
-            parserKind: inspected.kind,
-          } satisfies Prisma.InputJsonObject,
+          payload: {},
         },
       })
       return document
     })
   } catch (error) {
     // 数据库写入失败时回收刚上传的文件，避免 OSS 出现孤儿对象。
-    await deleteOssObject(storageKey).catch((cleanupError) => {
-      console.error(
-        "Failed to roll back knowledge document upload",
-        cleanupError
-      )
+    await deleteOssObject(storageKey).catch(async () => {
+      // 删除期间上传的原件可能尚未入库；OSS 回收失败时用无外键任务继续清理。
+      await prisma.documentProcessingJob.create({
+        data: {
+          type: "CLEANUP",
+          dedupeKey: `cleanup:${id}:${checksumSha256}`,
+          payload: { storageKey, documentId: id, reason: "upload-failed" },
+        },
+      })
     })
     throw error
   }
@@ -210,7 +203,7 @@ export const renameKnowledgeDocument = async (
     await lockOwnedKnowledgeBase(db, userId, document.knowledgeBaseId)
     const updated = await db.knowledgeDocument.updateMany({
       where,
-      data: { title: input.title, revision: { increment: 1 } },
+      data: { title: input.title },
     })
     if (updated.count !== 1) throw knowledgeDocumentNotFound()
     return db.knowledgeDocument.findUniqueOrThrow({
@@ -219,7 +212,6 @@ export const renameKnowledgeDocument = async (
         id: true,
         knowledgeBaseId: true,
         title: true,
-        revision: true,
         updatedAt: true,
       },
     })
@@ -313,7 +305,7 @@ export const reparseKnowledgeDocument = async (
           409
         )
 
-      // 与保存共用版本条件，阻止旧标签页的确认覆盖别人刚保存的正文。
+      // 核对确认时的正文版本，阻止旧标签页覆盖已完成的新解析结果。
       const updated = await db.knowledgeDocument.updateMany({
         where: {
           ...where,
@@ -324,7 +316,6 @@ export const reparseKnowledgeDocument = async (
           status: "QUEUED",
           parseErrorCode: null,
           parseErrorMessage: null,
-          revision: { increment: 1 },
         },
       })
       if (updated.count !== 1)
@@ -343,92 +334,9 @@ export const reparseKnowledgeDocument = async (
           targetRevision: document.contentRevision,
           // 失败后允许重新发起；重复点击由同库事务锁和 QUEUED 状态阻止。
           dedupeKey: `reparse:${id}:${randomUUID()}`,
-          payload: {
-            storageKey: document.storageKey,
-            checksumSha256: document.checksumSha256,
-          },
+          payload: {},
         },
       })
-      return db.knowledgeDocument.findUniqueOrThrow({
-        where: { id },
-        select: documentDetailSelect,
-      })
-    },
-    { isolationLevel: "ReadCommitted", maxWait: 5_000, timeout: 10_000 }
-  )
-
-/** 保存解析后的副本，不覆盖 OSS 原件，也不重新调用 MinerU。 */
-export const saveKnowledgeDocumentContent = async (
-  userId: string,
-  id: string,
-  input: SaveKnowledgeDocumentContentInput
-) =>
-  prisma.$transaction(
-    async (db) => {
-      const where = {
-        id,
-        deletedAt: null,
-        knowledgeBase: { userId, deletedAt: null },
-      }
-      const initial = await db.knowledgeDocument.findFirst({
-        where,
-        select: { knowledgeBaseId: true },
-      })
-      if (!initial) throw knowledgeDocumentNotFound()
-
-      // 与知识库/目录删除共用锁，等待后重新读取，避免在已删除的资源上保存。
-      await lockOwnedKnowledgeBase(db, userId, initial.knowledgeBaseId)
-      const document = await db.knowledgeDocument.findFirst({
-        where,
-        select: documentDetailSelect,
-      })
-      if (!document) throw knowledgeDocumentNotFound()
-      if (document.status !== "READY") {
-        throw new KnowledgeError(
-          "KNOWLEDGE_DOCUMENT_NOT_READY",
-          "文档尚未解析完成，不能保存正文",
-          409
-        )
-      }
-
-      const markdown = normalizeText(input.markdownContent)
-      // parseMetadata 是可空的 JSON 字段；保留资源清单和解析来源，只重算正文定位。
-      const metadata = document.parseMetadata
-      const parseMetadata = JSON.parse(
-        JSON.stringify({
-          ...(metadata &&
-          typeof metadata === "object" &&
-          !Array.isArray(metadata)
-            ? metadata
-            : {}),
-          sections: extractMarkdownSections(markdown),
-        })
-      ) as Prisma.InputJsonObject
-
-      // 版本必须放在 UPDATE 条件中；单独读版本再无条件更新会丢失另一个标签页的修改。
-      const result = await db.knowledgeDocument.updateMany({
-        where: {
-          ...where,
-          status: "READY",
-          contentRevision: input.expectedContentRevision,
-        },
-        data: {
-          markdownContent: markdown,
-          plainText: markdownToPlainText(markdown),
-          parseMetadata,
-          revision: { increment: 1 },
-          contentRevision: { increment: 1 },
-          chunkStatus: "PENDING",
-          chunkedContentRevision: null,
-        },
-      })
-      if (result.count !== 1) {
-        throw new KnowledgeError(
-          "CONTENT_REVISION_CONFLICT",
-          "正文版本已变化，请保留草稿并重新加载最新内容",
-          409
-        )
-      }
       return db.knowledgeDocument.findUniqueOrThrow({
         where: { id },
         select: documentDetailSelect,

@@ -92,6 +92,7 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
         message,
         selectedModelId: body?.selectedModelId,
         selectedToolName: body?.selectedToolName ?? null,
+        documentId: body?.documentId,
         trigger,
       },
     }
@@ -113,7 +114,9 @@ export interface UseAiChatOptions {
   initialMessages?: UIMessage[]
   /** 当前选择的模型；每次发送时都会读取最新值。 */
   selectedModelId: ChatModelId
-  /** 当前选择的工具；工具功能启用前应保持为 null。 */
+  /** 文档预览问答的范围；普通聊天省略。 */
+  documentId?: string
+  /** 额外工具选择；默认知识库检索无需选择。 */
   selectedToolName?: string | null
 }
 
@@ -134,6 +137,7 @@ export const useAiChat = ({
   initialMessages = [],
   selectedModelId,
   selectedToolName = null,
+  documentId,
 }: UseAiChatOptions) => {
   /** 用于在回复完成后刷新会话列表和会话详情。 */
   const queryClient = useQueryClient()
@@ -152,6 +156,10 @@ export const useAiChat = ({
     const refreshQueries = () => {
       void queryClient.invalidateQueries({ queryKey: ["chats"] })
       void queryClient.invalidateQueries({ queryKey: ["chat", chatId] })
+      if (documentId)
+        void queryClient.invalidateQueries({
+          queryKey: ["document-chat", documentId],
+        })
     }
 
     const instance = new Chat<UIMessage>({
@@ -174,7 +182,7 @@ export const useAiChat = ({
 
     backgroundChats.set(chatId, instance)
     return instance
-  }, [chatId, initialMessages, queryClient])
+  }, [chatId, initialMessages, queryClient, documentId])
 
   /**
    * 传入外部 Chat 实例后，useChat 只负责订阅状态；组件卸载不会自动 stop。
@@ -264,6 +272,7 @@ export const useAiChat = ({
             body: {
               selectedModelId: modelId,
               selectedToolName,
+              documentId,
             },
           }
         )
@@ -283,6 +292,7 @@ export const useAiChat = ({
       isGenerating,
       selectedModelId,
       selectedToolName,
+      documentId,
     ]
   )
 
@@ -307,6 +317,7 @@ export const useAiChat = ({
         body: {
           selectedModelId,
           selectedToolName,
+          documentId,
         },
       })
 
@@ -319,6 +330,7 @@ export const useAiChat = ({
       isGenerating,
       selectedModelId,
       selectedToolName,
+      documentId,
     ]
   )
 

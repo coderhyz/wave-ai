@@ -28,6 +28,7 @@ import {
   usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input"
 import { chatModels, type ChatModelId } from "@/lib/ai/model"
+import { DropdownMenuCheckboxItem } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 
@@ -54,6 +55,9 @@ const MAX_ATTACHMENT_SIZE = 2 * 1024 * 1024
 const MAX_ATTACHMENTS = 3
 
 interface ChatComposerProps {
+  /** 网页搜索默认开启，工具菜单中的开关只控制搜索能力。 */
+  webSearchEnabled?: boolean
+  onWebSearchEnabledChange?: (enabled: boolean) => void
   value: string
   onValueChange: (value: string) => void
   onSubmit: (message: PromptInputMessage) => Promise<boolean>
@@ -146,6 +150,8 @@ export function ChatComposer({
   variant = "docked",
   allowAttachments = true,
   placeholder = "问点什么，一起探索",
+  webSearchEnabled = true,
+  onWebSearchEnabledChange,
 }: ChatComposerProps) {
   const isHero = variant === "hero"
   const isGenerating = status === "submitted" || status === "streaming"
@@ -167,7 +173,7 @@ export function ChatComposer({
   const handleAttachmentError = useCallback(
     ({ code }: { code: "max_files" | "max_file_size" | "accept" }) => {
       if (!allowAttachments) {
-        toast.error("文档问答仅支持文字提问")
+        toast.error("当前模式仅支持文字提问")
         return
       }
       const messages = {
@@ -240,13 +246,17 @@ export function ChatComposer({
                   <Microscope className="mr-2 size-5" />
                   深度研究
                 </PromptInputActionMenuItem>
-                <PromptInputActionMenuItem
-                  className="h-11 rounded-xl text-base"
-                  disabled
-                >
-                  <Globe2 className="mr-2 size-5" />
-                  网页搜索
-                </PromptInputActionMenuItem>
+                {onWebSearchEnabledChange && (
+                  <DropdownMenuCheckboxItem
+                    className="h-11 rounded-xl text-base"
+                    checked={webSearchEnabled}
+                    disabled={isGenerating}
+                    onCheckedChange={onWebSearchEnabledChange}
+                  >
+                    <Globe2 className="mr-2 size-5" />
+                    网页搜索
+                  </DropdownMenuCheckboxItem>
+                )}
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
           )}

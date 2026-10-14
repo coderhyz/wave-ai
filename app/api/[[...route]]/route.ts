@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception"
 import { getAuthUser } from "@/lib/hono/hono-middware"
 import { noteRoute } from "./note"
 import { chatRoute } from "./chat"
+import { agentRoute } from "./agent"
 import { knowledgeBaseRoute } from "./knowledge-base"
 import { knowledgeFolderRoute } from "./knowledge-folder"
 import { knowledgeDocumentRoute } from "./knowledge-document"
@@ -33,6 +34,8 @@ const routes = app
   .basePath("/api")
   .route("/note", noteRoute)
   .route("/chat", chatRoute)
+  // 联网生成走独立入口；现有 /chat 仍负责普通对话和文档问答。
+  .route("/agent", agentRoute)
   .route("/knowledge-bases", knowledgeBaseRoute)
   .route("/knowledge-folders", knowledgeFolderRoute)
   .route("/knowledge-documents", knowledgeDocumentRoute)

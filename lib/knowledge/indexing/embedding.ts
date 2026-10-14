@@ -36,6 +36,7 @@ async function embedTexts(
         ]),
       }),
   })
+  // SDK 内部已对输入文本进行长度检查，超长会抛出异常；无需在此重复检查。
   const { embeddings } = await embedMany({
     model: provider.embedding(EMBEDDING_MODEL),
     values,

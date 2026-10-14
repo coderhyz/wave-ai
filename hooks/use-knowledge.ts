@@ -146,9 +146,9 @@ export function useDeleteKnowledgeBase(knowledgeBaseId: string) {
         (current) =>
           current
             ? {
-                ...current,
-                items: current.items.filter(({ id }) => id !== knowledgeBaseId),
-              }
+              ...current,
+              items: current.items.filter(({ id }) => id !== knowledgeBaseId),
+            }
             : undefined
       )
       queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] })
@@ -218,7 +218,7 @@ async function throwRequestError(response: Response): Promise<never> {
     const body = await response.json()
     throw new KnowledgeRequestError(
       (typeof body.error === "string" ? body.error : body.error?.message) ??
-        `请求失败（${response.status}）`,
+      `请求失败（${response.status}）`,
       response.status
     )
   }
@@ -340,9 +340,9 @@ export function useKnowledgeTree(knowledgeBaseId: string) {
     // 目录摘要也随任务刷新，未被选中的文档不会一直显示旧状态。
     refetchInterval: (query) =>
       !query.state.error &&
-      query.state.data?.documents.some(
-        ({ status }) => status === "QUEUED" || status === "PARSING"
-      )
+        query.state.data?.documents.some(
+          ({ status }) => status === "QUEUED" || status === "PARSING"
+        )
         ? 3000
         : false,
   })

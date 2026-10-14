@@ -86,6 +86,8 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
      * selectedModelId 和 selectedToolName 来自本次 sendText/regenerate，
      * 所以用户切换模型后不需要重新创建 useChat 实例。
      */
+    // 发送和重新生成都使用当前工具栏的开关，旧消息的设置不能覆盖用户的新选择。
+    const webSearchEnabled = body?.webSearchEnabled ?? true
     return {
       body: {
         id,
@@ -93,6 +95,7 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
         selectedModelId: body?.selectedModelId,
         selectedToolName: body?.selectedToolName ?? null,
         documentId: body?.documentId,
+        webSearchEnabled,
         trigger,
       },
     }
@@ -108,6 +111,8 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
 const backgroundChats = new Map<string, Chat<UIMessage>>()
 
 export interface UseAiChatOptions {
+  /** 网页搜索默认开启；发送和重新生成都读取当前值。 */
+  webSearchEnabled?: boolean
   /** 当前会话 UUID。 */
   chatId: string
   /** 从会话详情接口读取的历史消息。 */
@@ -138,6 +143,7 @@ export const useAiChat = ({
   selectedModelId,
   selectedToolName = null,
   documentId,
+  webSearchEnabled = true,
 }: UseAiChatOptions) => {
   /** 用于在回复完成后刷新会话列表和会话详情。 */
   const queryClient = useQueryClient()
@@ -154,8 +160,8 @@ export const useAiChat = ({
     }
 
     const refreshQueries = () => {
-      void queryClient.invalidateQueries({ queryKey: ["chats"] })
-      void queryClient.invalidateQueries({ queryKey: ["chat", chatId] })
+      queryClient.invalidateQueries({ queryKey: ["chats"] })
+      queryClient.invalidateQueries({ queryKey: ["chat", chatId] })
       if (documentId)
         void queryClient.invalidateQueries({
           queryKey: ["document-chat", documentId],
@@ -235,6 +241,7 @@ export const useAiChat = ({
         return false
       }
 
+
       /** 新请求开始前清除上一轮错误状态。 */
       chat.clearError()
       backgroundChats.set(chatId, chatInstance)
@@ -266,6 +273,7 @@ export const useAiChat = ({
             metadata: {
               createdAt: new Date().toISOString(),
               modelId,
+              webSearchEnabled,
             },
           },
           {
@@ -273,6 +281,7 @@ export const useAiChat = ({
               selectedModelId: modelId,
               selectedToolName,
               documentId,
+              webSearchEnabled,
             },
           }
         )
@@ -293,6 +302,7 @@ export const useAiChat = ({
       selectedModelId,
       selectedToolName,
       documentId,
+      webSearchEnabled,
     ]
   )
 
@@ -318,6 +328,7 @@ export const useAiChat = ({
           selectedModelId,
           selectedToolName,
           documentId,
+          webSearchEnabled,
         },
       })
 
@@ -331,6 +342,7 @@ export const useAiChat = ({
       selectedModelId,
       selectedToolName,
       documentId,
+      webSearchEnabled,
     ]
   )
 

@@ -41,6 +41,8 @@ export const sendChatMessageSchema = z.object({
   message: incomingUserMessageSchema,
   /** 只能选择服务端模型白名单中存在的模型。 */
   selectedModelId: z.enum(CHAT_MODEL_IDS),
+  /** 普通聊天默认启用网页搜索；工具菜单可以关闭本次请求的搜索能力。 */
+  webSearchEnabled: z.boolean().default(true),
   /** 额外工具选择的预留字段；默认知识库检索无需选择，应传 null。 */
   selectedToolName: z.string().trim().min(1).max(50).nullable().default(null),
   /** 区分发送新消息和重新生成已有回复。 */

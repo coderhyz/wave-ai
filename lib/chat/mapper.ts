@@ -1,6 +1,12 @@
 import type { Message, Prisma } from "@/app/generated/prisma"
 import type { UIMessage } from "ai"
 
+/** 网页搜索默认开启；历史消息记录关闭时，重新打开会话恢复该设置。 */
+export function getMessageWebSearchEnabled(message?: Pick<UIMessage, "metadata">): boolean {
+  const metadata = message?.metadata
+  return !(metadata && typeof metadata === "object" && "webSearchEnabled" in metadata && metadata.webSearchEnabled === false)
+}
+
 /**
  * 数据库消息转换为前端消息时会用到的字段集合。
  * 只选取转换所需字段，避免该模块依赖完整的 Message 类型。

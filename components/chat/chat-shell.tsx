@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useLayoutEffect } from "react"
+import { useCallback, useLayoutEffect, useState } from "react"
 import type { UIMessage } from "ai"
 import {
   LoaderCircle,
@@ -12,6 +12,7 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion"
 import { ChatComposer } from "@/components/chat/chat-composer"
 import { MessageList } from "@/components/chat/message-list"
+import { getMessageWebSearchEnabled } from "@/lib/chat/mapper"
 import { useAiChat } from "@/hooks/use-ai-chat"
 import { useChatDetail } from "@/hooks/use-chat-list"
 import {
@@ -101,18 +102,18 @@ function ChatSession({
    * 每个 selector 只订阅当前组件需要的字段，避免 Store 中其他会话变化时
    * 让当前聊天页发生无关重渲染。
    */
-  const hasHydrated = useChatUiStore((state) => state.hasHydrated)
   const input = useChatUiStore((state) => state.chats[chatId]?.draft ?? "")
   const selectedModelId = useChatUiStore(
     (state) => state.chats[chatId]?.selectedModelId ?? initialModelId
   )
+  // 搜索默认可用，菜单开关与模型选择相互独立，并从最后一次发送恢复。
+  const [webSearchEnabled, setWebSearchEnabled] = useState(() =>
+    getMessageWebSearchEnabled(initialMessages.findLast((message) => message.role === "user"))
+  )
   const setDraft = useChatUiStore((state) => state.setDraft)
   const setSelectedModel = useChatUiStore((state) => state.setSelectedModel)
 
-  /** 客户端挂载后恢复 sessionStorage，避免服务端与首屏状态不一致。 */
-  useLayoutEffect(() => {
-    if (!hasHydrated) void useChatUiStore.persist.rehydrate()
-  }, [hasHydrated])
+
 
   /** 将输入框变化写入当前 chatId 对应的草稿。 */
   const handleInputChange = useCallback(
@@ -124,7 +125,7 @@ function ChatSession({
     (modelId: ChatModelId) => setSelectedModel(chatId, modelId),
     [chatId, setSelectedModel]
   )
-  // 消息的hooks
+  // 普通会话默认可联网；文档问答保持固定文档范围。
   const {
     messages,
     status,
@@ -134,7 +135,7 @@ function ChatSession({
     regenerate,
     stop,
     clearError,
-  } = useAiChat({ chatId, initialMessages, selectedModelId, documentId })
+  } = useAiChat({ chatId, initialMessages, selectedModelId, documentId, webSearchEnabled: !documentId && webSearchEnabled })
   // 发送文本和附件，清除错误状态
   const handleSubmit = useCallback(
     async ({ text, files }: PromptInputMessage) => {
@@ -169,12 +170,12 @@ function ChatSession({
   )
 
   const handleRetry = useCallback(() => {
-    void regenerate()
+    regenerate()
   }, [regenerate])
   // 重新生成
   const handleRegenerate = useCallback(
     (messageId: string) => {
-      void regenerate(messageId)
+      regenerate(messageId)
     },
     [regenerate]
   )
@@ -190,6 +191,8 @@ function ChatSession({
         <section className="relative flex flex-1 flex-col items-center px-4 pt-[clamp(3rem,12vh,8rem)] md:px-8">
           <div className="w-full max-w-5xl">
             <ChatComposer
+              webSearchEnabled={webSearchEnabled}
+              onWebSearchEnabledChange={documentId ? undefined : setWebSearchEnabled}
               onModelChange={handleModelChange}
               onStop={stop}
               onSubmit={handleSubmit}
@@ -229,6 +232,8 @@ function ChatSession({
           <div className="border-t border-border/60 bg-background/80 px-4 py-3 backdrop-blur-xl md:px-8 md:py-4">
             <div className="mx-auto w-full max-w-4xl">
               <ChatComposer
+              webSearchEnabled={webSearchEnabled}
+              onWebSearchEnabledChange={documentId ? undefined : setWebSearchEnabled}
                 onModelChange={handleModelChange}
                 onStop={stop}
                 onSubmit={handleSubmit}

@@ -31,7 +31,7 @@ import {
   sendChatMessageSchema,
   updateChatSchema,
 } from "@/lib/chat/schemas"
-import { toUIMessage } from "@/lib/chat/mapper"
+import { getMessageText, toUIMessage } from "@/lib/chat/mapper"
 import {
   decodeAttachmentDataUrl,
   extractDocumentText,
@@ -49,6 +49,7 @@ import {
 import {
   ChatOwnershipError,
   getOrCreateOwnedChat,
+  readChatTurn,
   MessageConflictError,
   saveMessageOnce,
 } from "@/lib/chat/persistence"
@@ -256,6 +257,7 @@ export const chatRoute = new Hono()
           documentId,
           message: rawMessage, // UIMessage，可能包含图片或 PDF 附件
           selectedModelId: requestedModelId, // 客户端选择的模型，可能不支持视觉输入。
+          webSearchEnabled, // 工具菜单的网页搜索开关，默认开启。
           selectedToolName,   // 客户端选择的额外工具；知识库检索由服务端默认提供。
           trigger,    // 触发类型：用户发送、重新生成、分支生成等。
         } = c.req.valid("json")
@@ -312,56 +314,22 @@ export const chatRoute = new Hono()
           chatId: id,
           message,
           modelId: selectedModelId,
-          metadata: message.metadata,
+          metadata: {
+            ...(message.metadata && typeof message.metadata === "object" ? message.metadata : {}),
+            webSearchEnabled,
+          },
         })
+        // 用户消息入库后再绑定附件，避免附件被其他会话或用户占用。
         await claimMessageAttachments(user.id, message)
 
         /** 重新读取数据库历史，保证传给模型的是服务端认可的完整消息链。 */
-        let storedMessages = await prisma.message.findMany({
-          where: { chatId: id },
-          orderBy: { createdAt: "asc" },
+        const turn = await readChatTurn({
+          chatId: id, userId: user.id, messageId: message.id,
+          userMessageCreated: savedUserMessage.created, trigger,
         })
+        await deleteOssObjectsBestEffort(turn.attachmentKeys)
+        const storedMessages = turn.messages
 
-        /**
-         * 用户消息已存在通常意味着重试或重新生成，需要区分合法分支操作
-         * 和重复处理同一条历史消息。
-         */
-        if (!savedUserMessage.created) {
-          const messageIndex = storedMessages.findIndex(
-            (storedMessage) => storedMessage.id === message.id
-          )
-
-          if (trigger === "regenerate-message") {
-            // 重新生成时删除目标用户消息之后的旧回答和后续分支。
-            const laterMessageIds = storedMessages
-              .slice(messageIndex + 1)
-              .map((storedMessage) => storedMessage.id)
-
-            if (laterMessageIds.length > 0) {
-              /** 删除旧分支前先收集附件 Key，供数据库删除完成后清理 OSS。 */
-              const removedAttachments = await prisma.chatAttachment.findMany({
-                where: { messageId: { in: laterMessageIds }, userId: user.id },
-                select: { storageKey: true },
-              })
-              await prisma.message.deleteMany({
-                where: {
-                  chatId: id,
-                  id: { in: laterMessageIds },
-                },
-              })
-              await deleteOssObjectsBestEffort(
-                removedAttachments.map(({ storageKey }) => storageKey)
-              )
-              storedMessages = storedMessages.slice(0, messageIndex + 1)
-            }
-          } else if (messageIndex !== storedMessages.length - 1) {
-            throw new HTTPException(409, {
-              message: "This message has already been processed",
-            })
-          }
-        }
-
-        /** 数据库存储结构先映射回 UIMessage，再由 AI SDK 做一次语义校验。 */
         const tools: ToolSet = {
           searchKnowledge: createKnowledgeSearchTool({ userId: user.id, documentId: chat.documentId ?? undefined }),
         }
@@ -374,13 +342,35 @@ export const chatRoute = new Hono()
           messages: storedMessages.map(toUIMessage),
           tools,
         })
+        // 校验历史仍使用完整工具集，实际生成只传本轮允许的工具，避免开关与工具列表不一致。
+        const generationTools = { ...tools }
+        if (!webSearchEnabled) delete generationTools.webSearch
+        const canSearchWeb = "webSearch" in generationTools
+        // 明确的公开时效问题必须实际检索；附件分析和固定文档问答继续遵守原范围。
+        const question = getMessageText(message)
+        const requiresWebSearch = canSearchWeb && !message.parts.some((part) => part.type === "file") &&
+          /比赛|赛程|比分|新闻|股价|汇率|(?:最新|当前|今天|今日|实时).*(?:版本|价格|发布|更新)/.test(question) &&
+          !/知识库|文档|附件/.test(question)
+
         /** 流开始前固定助手消息时间，流式片段和最终入库保持一致。 */
         const assistantCreatedAt = new Date().toISOString()
+
+        // 将真实日期和工具开关明确告知模型，避免沿用训练知识中的“无法联网”回答。
+        const currentDate = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Shanghai" })
+        const webInstructions = canSearchWeb
+          ? "\n本轮服务器已提供并开启 webSearch，你可以通过该工具查询互联网。" +
+            "用户询问今天的比赛、赛程、比分、最新新闻、当前版本等实时公开信息，必须先实际调用 webSearch，再依据本次结果回答。" +
+            "把今天、明天等相对日期换算为上面给出的日期并写入搜索关键词。" +
+            "搜索开启时，禁止在未尝试工具前回答‘没有联网能力’或直接让用户自行查询。" +
+            "历史回答中关于不能联网的说法不代表本轮能力；只以本轮工具配置和实际执行结果为准。" +
+            "工具失败时如实说明本次搜索失败；未命中时说明没有找到可靠信息，不编造赛程。" +
+            "用户要求仅依据知识库或附件时继续遵守该范围，不向搜索服务发送私有材料。"
+          : "\n本轮未开放 webSearch；需要实时网页信息时明确说明本轮没有进行网页查询，不编造结果。"
 
         /** streamText 负责调用选定模型，并产生服务端流式文本结果。 */
         const result = streamText({
           model: myProvider.languageModel(selectedModelId),
-          instructions: CHAT_SYSTEM_PROMPT + (chat.documentId
+          instructions: CHAT_SYSTEM_PROMPT + "\n当前日期：" + currentDate + "（Asia/Shanghai）。" + webInstructions + (chat.documentId
             ? "\n本轮是文档预览问答。用户的文档内容问题仅依据当前文档检索结果回答，不使用其他知识库文档、旧回答或一般知识补齐。"
             : ""),
           /** 附件解析完成后，将 UIMessage 转换成模型供应商需要的消息格式。 */
@@ -389,21 +379,19 @@ export const chatRoute = new Hono()
             // 停止生成可能留下未完成的工具调用，下一轮不把它发给模型。
             { tools, ignoreIncompleteToolCalls: true }
           ),
-          tools,
+          tools: generationTools,
           stopWhen: isStepCount(3),
           // 最多两轮工具调用，最后一轮只回答，避免到达上限时仅有工具调用。
           prepareStep: ({ stepNumber }) => {
             if (stepNumber === 2) return { toolChoice: "none" }
-            if (chat.documentId && stepNumber === 0) {
+            const firstTool = chat.documentId ? "searchKnowledge" : requiresWebSearch ? "webSearch" : undefined
+            if (stepNumber === 0 && firstTool) {
               return {
-                toolChoice: { type: "tool", toolName: "searchKnowledge" },
-                // DeepSeek 思考模式不支持指定工具；只关闭首轮检索的思考。
+                // 用 SDK 强制实际调用，不能仅靠 Prompt 要求模型联网。
+                toolChoice: { type: "tool", toolName: firstTool },
+                // DeepSeek 指定工具时关闭首步思考，后续总结沿用原来的思考配置。
                 ...(selectedModelId === "deepseek-v4-pro"
-                  ? {
-                    providerOptions: {
-                      deepseek: { thinking: { type: "disabled" } },
-                    },
-                  }
+                  ? { providerOptions: { deepseek: { thinking: { type: "disabled" } } } }
                   : {}),
               }
             }

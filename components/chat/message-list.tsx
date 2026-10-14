@@ -1,7 +1,7 @@
 "use client"
 
 import { memo, useCallback, useLayoutEffect, useRef } from "react"
-import type { ChatStatus, UIMessage } from "ai"
+import { isToolUIPart, getToolName, type ChatStatus, type UIMessage } from "ai"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { Copy, Download, LoaderCircle, RefreshCcw } from "lucide-react"
 import { toast } from "sonner"
@@ -145,35 +145,27 @@ const ChatMessage = memo(function ChatMessage({
   const documentParts = fileParts.filter(
     (part) => !part.mediaType.startsWith("image/")
   )
-  const reasoningParts = message.parts.filter(
-    (
-      part
-    ): part is Extract<UIMessage["parts"][number], { type: "reasoning" }> =>
-      part.type === "reasoning"
-  )
-
-  /** 同一消息可能产生多个 reasoning part，展示时按产生顺序合并。 */
-  const reasoningText = reasoningParts.map((part) => part.text).join("\n\n")
-  const lastPart = message.parts.at(-1)
-
-  /**
-   * 只有“最后一条、仍在流式生成、当前仍输出 reasoning”的助手消息，
-   * 才让思考组件保持流式状态；历史思考内容不应重新出现动画。
-   */
-  const isReasoningStreaming =
-    message.role === "assistant" &&
-    isLastMessage &&
-    isStreaming &&
-    (lastPart?.type === "reasoning" ||
-      reasoningParts.some((part) => part.state === "streaming"))
+  // 每轮模型调用由 step-start 分隔；上一轮未完成的工具不能随新一轮继续显示“正在搜索”。
+  const currentStepStart = message.parts.findLastIndex((part) => part.type === "step-start")
+  // 来源使用服务端写入的 source-url；按 URL 去重，并仅渲染网页协议链接。
+  const sources = Array.from(new Map(message.parts
+    .filter((part) => part.type === "source-url")
+    .filter((part) => /^https?:\/\//.test(part.url))
+    .map((part) => [part.url, part])).values())
   const citations = getKnowledgeCitations(message)
-  const text = textParts
+  const bodyText = textParts
     .map((part) =>
       message.role === "assistant"
         ? formatKnowledgeCitationText(part.text, citations)
         : part.text
     )
     .join("\n")
+  // 复制和 Markdown 导出共用来源文本；处理标题及 URL 括号，避免破坏链接格式。
+  const sourceText = sources.map((source) =>
+    "- [" + (source.title ?? source.url).replace(/[\[\]\\]/g, "") + "](" +
+    source.url.replaceAll("(", "%28").replaceAll(")", "%29") + ")"
+  ).join("\n")
+  const text = bodyText + (sourceText ? "\n\n参考来源：\n" + sourceText : "")
   const metadata = getMessageMetadata(message)
 
   /**
@@ -194,7 +186,7 @@ const ChatMessage = memo(function ChatMessage({
       toast.error("复制失败")
     }
   }
-  /** 只导出文本 part；附件和 reasoning 不写入 Markdown 文件。 */
+  /** 导出正文及网页来源；附件和 reasoning 不写入 Markdown 文件。 */
   const downloadMarkdown = () => {
     const roleTitle = message.role === "assistant" ? "AI 回复" : "用户消息"
     const markdown = `# ${roleTitle}\n\n${text.trim()}\n`
@@ -222,19 +214,6 @@ const ChatMessage = memo(function ChatMessage({
             : "w-full"
         }
       >
-        {/* 助手 reasoning 独立于最终正文，可折叠并拥有自己的滚动区域。 */}
-        {message.role === "assistant" && reasoningText && (
-          <Reasoning
-            className="w-full rounded-xl border border-border/60 bg-muted/30 px-4 py-3"
-            isStreaming={isReasoningStreaming}
-          >
-            <ReasoningTrigger />
-            <ReasoningContent className="max-h-80 overflow-y-auto border-t border-border/60 pt-3 leading-6">
-              {reasoningText}
-            </ReasoningContent>
-          </Reasoning>
-        )}
-
         {/* 图片使用网格预览；原文件地址仍由 ChatAttachment 统一处理。 */}
         {imageParts.length > 0 && (
           <Attachments
@@ -264,25 +243,82 @@ const ChatMessage = memo(function ChatMessage({
           </Attachments>
         )}
 
-        {/*
-         * 助手正文交给 Streamdown 渲染 Markdown；用户正文按纯文本展示，
-         * 避免用户输入被解释成复杂 Markdown，同时保留换行。
-         */}
-        {textParts.map((part, index) =>
-          message.role === "assistant" ? (
-            <MessageResponse key={`${message.id}-${index}`}>
-              {formatKnowledgeCitationText(part.text, citations)}
-            </MessageResponse>
-          ) : (
-            <p
-              className="leading-7 break-words whitespace-pre-wrap"
-              key={`${message.id}-${index}`}
-            >
-              {part.text}
-            </p>
-          )
-        )}
+        {/* 按 SDK parts 的真实顺序渲染，保留“思考 → 搜索 → 后续思考/回答”的每一轮过程。 */}
+        {message.parts.map((part, index) => {
+          const key = message.id + "-part-" + index
+          const isCurrentStep = index > currentStepStart
+
+          if (message.role === "assistant" && part.type === "reasoning" && part.text) {
+            // 后面出现工具或回答时，这段思考已经结束；仅当前轮的流式思考显示动画。
+            const hasLaterAction = message.parts.slice(index + 1).some(
+              (next) => next.type === "text" || isToolUIPart(next)
+            )
+            const isThinking = isLastMessage && isStreaming && isCurrentStep &&
+              part.state === "streaming" && !hasLaterAction
+            return (
+              <Reasoning
+                key={key}
+                className="w-full rounded-xl border border-border/60 bg-muted/30 px-4 py-3"
+                isStreaming={isThinking}
+              >
+                <ReasoningTrigger />
+                <ReasoningContent className="max-h-80 overflow-y-auto border-t border-border/60 pt-3 leading-6">
+                  {part.text}
+                </ReasoningContent>
+              </Reasoning>
+            )
+          }
+
+          if (isToolUIPart(part) && getToolName(part) === "webSearch") {
+            const output = part.state === "output-available" ? part.output : undefined
+            // SDK 执行异常和工具返回 success:false 都是失败，不把它们显示成搜索完成。
+            const failed = part.state === "output-error" ||
+              (output !== null && typeof output === "object" && "success" in output && output.success === false)
+            const errorText = part.state === "output-error" ? part.errorText :
+              output !== null && typeof output === "object" && "error" in output && typeof output.error === "string" ? output.error : undefined
+            const query = part.input !== null && typeof part.input === "object" && "query" in part.input && typeof part.input.query === "string" ? part.input.query : ""
+            const empty = output !== null && typeof output === "object" && "results" in output && Array.isArray(output.results) && output.results.length === 0
+            // 判断本次调用，而不是只看整条消息是否还在生成；历史未完成调用如实显示未完成。
+            const isActive = isLastMessage && isStreaming && isCurrentStep
+            const label = failed ? "搜索失败"
+              : part.state === "output-available" ? (empty ? "未找到搜索结果" : "搜索完成")
+              : part.state === "output-denied" ? "搜索已取消"
+              : isActive && part.state === "input-streaming" ? "准备搜索"
+              : isActive && part.state === "input-available" ? "正在搜索"
+              : "搜索未完成"
+            return (
+              <div key={part.toolCallId} role="status" className="mb-3 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-sm">
+                {label}{query && <span className="ml-2 text-muted-foreground">{query}</span>}
+                {failed && errorText && <p className="mt-1 text-destructive">{errorText}</p>}
+              </div>
+            )
+          }
+
+          if (part.type === "text") {
+            return message.role === "assistant" ? (
+              <MessageResponse key={key}>
+                {formatKnowledgeCitationText(part.text, citations)}
+              </MessageResponse>
+            ) : (
+              <p className="leading-7 break-words whitespace-pre-wrap" key={key}>
+                {part.text}
+              </p>
+            )
+          }
+          return null
+        })}
         <KnowledgeCitations message={message} />
+        {/* 阶段一取得的是搜索摘要，来源链接供用户继续阅读原文。 */}
+        {sources.length > 0 && (
+          <section aria-label="网页来源" className="mt-4 border-t border-border/50 pt-3">
+            <p className="mb-2 text-xs text-muted-foreground">参考来源 · 搜索摘要</p>
+            <div className="flex flex-wrap gap-2">
+              {sources.map((source) => <a key={source.sourceId} href={source.url} target="_blank" rel="noopener noreferrer" className="max-w-full rounded-lg border border-border/60 px-3 py-2 text-sm text-primary hover:underline">
+                {source.title || source.url}
+              </a>)}
+            </div>
+          </section>
+        )}
       </MessageContent>
       <MessageActions
         className={

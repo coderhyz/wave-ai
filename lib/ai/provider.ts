@@ -49,8 +49,13 @@ export const myProvider = {
 }
 
 /** 必须按实际执行模型取预算，包括图片输入时自动切换到的视觉模型。 */
-export const getChatGenerationSettings = (modelId: ChatModelId) => {
+export const getChatGenerationSettings = (
+  modelId: ChatModelId,
+  { reasoning = true }: { reasoning?: boolean } = {}
+) => {
   const model = chatModels.find((item) => item.id === modelId)
   if (!model) throw new Error(`未知的聊天模型：${modelId}`)
-  return getModelGenerationSettings(model)
+  return getModelGenerationSettings(
+    reasoning ? model : { ...model, reasoningTokenBudget: 0 }
+  )
 }

@@ -52,7 +52,7 @@ export function KnowledgeUploadToolbar({
           ) : (
             <Upload />
           )}
-          {upload.isPending ? "上传中" : "上传文件"}
+          {upload.isPending ? "上传并处理中" : "上传文件"}
         </Button>
         <Button
           variant="outline"
@@ -90,6 +90,11 @@ export function KnowledgeUploadToolbar({
           )
         }}
       />
+      {upload.isPending && (
+        <p role="status" className="text-xs text-muted-foreground">
+          正在上传并解析文件、建立索引，大文件可能需要几分钟，请保持页面打开。
+        </p>
+      )}
       {upload.isError && (
         <p role="alert" className="text-xs break-words text-destructive">
           {upload.error.message}

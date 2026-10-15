@@ -34,6 +34,7 @@ async function uploadMineruImages(
   rootPath: string,
   context: ParseContext
 ) {
+  context.signal?.throwIfAborted()
   if (!context.uploadAsset) return markdown
 
   let output = markdown
@@ -45,6 +46,7 @@ async function uploadMineruImages(
   ]
 
   for (const imagePath of imagePaths) {
+    context.signal?.throwIfAborted()
     // 图片路径相对于 full.md 所在目录解析。
     const normalizedPath = decodeURIComponent(imagePath).replace(/^\.\//, "")
     const extension = path.extname(normalizedPath).slice(1).toLowerCase()
@@ -52,11 +54,14 @@ async function uploadMineruImages(
     const file = archive.file(`${rootPath}${normalizedPath}`)
     if (!file || !mediaType) continue
 
-    // uploadAsset 由 Worker 注入，负责真正写 OSS 并返回站内 URL。
+    // uploadAsset 由文档处理流程注入，负责真正写 OSS 并返回站内 URL。
+    const data = await file.async("nodebuffer")
+    context.signal?.throwIfAborted()
     const url = await context.uploadAsset({
-      data: await file.async("nodebuffer"),
+      data,
       mediaType,
     })
+    context.signal?.throwIfAborted()
     output = output.split(`](${imagePath})`).join(`](${url})`)
   }
 
@@ -73,8 +78,13 @@ export function createMineruParser(
     kind,
     version: `mineru-${kind}@1`,
     async parse(input, context) {
+      context.signal?.throwIfAborted()
       // MinerU 返回 Markdown 和资源 ZIP；先把图片迁回本站再保存正文。
-      const result = await parseWithMineru(input, context.filename)
+      const result = await parseWithMineru(
+        input,
+        context.filename,
+        context.signal
+      )
       const markdown = normalizeText(
         await uploadMineruImages(
           result.markdown,
@@ -84,6 +94,7 @@ export function createMineruParser(
         )
       ).trim()
 
+      context.signal?.throwIfAborted()
       // markdownContent 是后续正文预览和分块使用的唯一正文。
       assertMarkdownSize(markdown)
       return {

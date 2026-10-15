@@ -42,7 +42,8 @@ export async function createResearchPlan(
   input: ResearchModelInput & ResearchOptions & { question: string }
 ) {
   input.signal.throwIfAborted()
-  const settings = getChatGenerationSettings(input.modelId)
+  // DeepSeek shares its output limit between reasoning and the JSON response.
+  const settings = getChatGenerationSettings(input.modelId, { reasoning: false })
   const result = await generateText({
     model: myProvider.languageModel(input.modelId),
     ...settings,
@@ -59,7 +60,7 @@ export async function createResearchPlan(
         schema: researchPlanSchema
       }),
     system:
-      "围绕用户最终要得到的成果，将问题拆成 2~6 个检索子问题，ID 使用 Q1~Q6，提供搜索词和完成标准。goal 和 scopeNotes 必须保留用户要求的交付形式、学习基础、周期、语言和格式。学习路线的检索应服务于阶段顺序、学习目标、练习和验收，而非仅收集概念解释。遵守深度、时效和来源范围。只规划，不回答外部事实，不输出私有思维链。",
+      "围绕用户最终要得到的成果，将问题拆成 2~6 个检索子问题，ID 使用 Q1~Q6，提供搜索词和完成标准。查询应覆盖不同信息需求，避免同义重复；保留必要的不同角度、反证和时效核查，不为减少查询而遗漏研究范围。goal 和 scopeNotes 必须保留用户要求的交付形式、学习基础、周期、语言和格式。学习路线的检索应服务于阶段顺序、学习目标、练习和验收，而非仅收集概念解释。遵守深度、时效和来源范围。只规划，不回答外部事实，不输出私有思维链。",
     prompt: JSON.stringify({
       question: input.question,
       depth: input.depth,

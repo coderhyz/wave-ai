@@ -3,11 +3,8 @@
  * 完成申请上传地址、上传原文件、轮询任务、下载结果 ZIP 和读取 full.md。
  */
 import JSZip from "jszip"
+import { setTimeout as sleep } from "node:timers/promises"
 import { KnowledgeParseError } from "@/lib/knowledge/parsers/types"
-
-/** MinerU 任务未完成时的轮询间隔。 */
-const sleep = (milliseconds: number) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds))
 
 /** MinerU 转换完成后交给本地适配层的数据。 */
 export type MineruResult = {
@@ -24,8 +21,14 @@ export type MineruResult = {
  */
 export async function parseWithMineru(
   input: Buffer,
-  filename: string
+  filename: string,
+  abortSignal?: AbortSignal
 ): Promise<MineruResult> {
+  const signal = AbortSignal.any([
+    AbortSignal.timeout(Number(process.env.MINERU_TIMEOUT_MS ?? 480000)),
+    ...(abortSignal ? [abortSignal] : []),
+  ])
+  signal.throwIfAborted()
   // 统一去除 base URL 末尾斜杠，避免拼接出双斜杠。
   const baseUrl = (
     process.env.MINERU_API_BASE_URL ?? "https://mineru.net"
@@ -42,6 +45,7 @@ export async function parseWithMineru(
   const createdResponse = await fetch(`${baseUrl}/api/v4/file-urls/batch`, {
     method: "POST",
     headers,
+    signal,
     body: JSON.stringify({
       files: [{ name: filename }],
       model_version: modelVersion,
@@ -50,7 +54,9 @@ export async function parseWithMineru(
       enable_formula: true,
     }),
   })
+  signal.throwIfAborted()
   const created = await createdResponse.json()
+  signal.throwIfAborted()
   if (!createdResponse.ok || created.code !== 0) {
     throw new KnowledgeParseError(
       "PARSE_FAILED",
@@ -66,7 +72,9 @@ export async function parseWithMineru(
   const uploadResponse = await fetch(uploadUrl, {
     method: "PUT",
     body: new Uint8Array(input),
+    signal,
   })
+  signal.throwIfAborted()
   if (!uploadResponse.ok) {
     throw new KnowledgeParseError(
       "PARSE_FAILED",
@@ -78,16 +86,17 @@ export async function parseWithMineru(
 
   // 第三步：按照环境变量配置的间隔轮询任务结果。
   const interval = Number(process.env.MINERU_POLL_INTERVAL_MS ?? 3000)
-  const timeout = Number(process.env.MINERU_TIMEOUT_MS ?? 480000)
-  const startedAt = Date.now()
   let resultZipUrl = ""
 
-  while (Date.now() - startedAt < timeout) {
+  while (true) {
+    signal.throwIfAborted()
     const statusResponse = await fetch(
       `${baseUrl}/api/v4/extract-results/batch/${batchId}`,
-      { headers }
+      { headers, signal }
     )
+    signal.throwIfAborted()
     const status = await statusResponse.json()
+    signal.throwIfAborted()
     const result = status.data?.extract_result?.[0]
 
     if (result?.state === "done") {
@@ -100,16 +109,25 @@ export async function parseWithMineru(
         `MinerU 解析失败：${result.err_msg ?? "未知错误"}`
       )
     }
-    await sleep(interval)
-  }
-
-  if (!resultZipUrl) {
-    throw new KnowledgeParseError("PARSE_TIMEOUT", "MinerU 解析超时", 400, true)
+    await sleep(interval, undefined, { signal }).catch((error: unknown) => {
+      signal.throwIfAborted()
+      throw error
+    })
   }
 
   // 第四步：下载结果压缩包，找到 MinerU 输出的 full.md。
-  const zipResponse = await fetch(resultZipUrl)
+  if (!resultZipUrl) {
+    throw new KnowledgeParseError(
+      "PARSE_FAILED",
+      "MinerU 未返回解析结果下载地址",
+      400,
+      true
+    )
+  }
+  const zipResponse = await fetch(resultZipUrl, { signal })
+  signal.throwIfAborted()
   const archive = await JSZip.loadAsync(await zipResponse.arrayBuffer())
+  signal.throwIfAborted()
   const markdownFile = Object.values(archive.files).find(
     (file) => !file.dir && /(^|\/)full\.md$/i.test(file.name)
   )
@@ -117,9 +135,12 @@ export async function parseWithMineru(
     throw new KnowledgeParseError("PARSE_FAILED", "MinerU 未返回 Markdown")
   }
 
+  const markdown = await markdownFile.async("string")
+  signal.throwIfAborted()
+
   // rootPath 用于从 ZIP 中定位 Markdown 引用的相对图片路径。
   return {
-    markdown: await markdownFile.async("string"),
+    markdown,
     archive,
     rootPath: markdownFile.name.slice(
       0,

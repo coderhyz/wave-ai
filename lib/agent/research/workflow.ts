@@ -5,6 +5,7 @@ import {
   InvalidToolInputError,
   NoSuchToolError,
   NoObjectGeneratedError,
+  NoOutputGeneratedError,
   type UIMessageChunk,
 } from "ai"
 import { createResearchBudget } from "@/lib/agent/harness/budgets"
@@ -39,7 +40,8 @@ export class ResearchWorkflowError extends Error {
     super(
       errorCode === "WORKFLOW_TIMEOUT"
         ? "深度研究已达到运行时限，未能完成报告。已取得的检索记录仍保留，请缩小研究范围后重试。"
-        : NoObjectGeneratedError.isInstance(options.cause)
+        : NoObjectGeneratedError.isInstance(options.cause) ||
+            NoOutputGeneratedError.isInstance(options.cause)
           ? `深度研究${phaseName}阶段失败：模型未返回符合结构要求的数据，请重试。`
           : `深度研究${phaseName}阶段失败，请稍后重试。`,
       options
@@ -61,7 +63,7 @@ export async function runResearchWorkflow(input: {
   input.signal?.throwIfAborted()
   const options = input.options ?? researchOptionsSchema.parse({})
   const limits = input.budget ?? DEFAULT_RESEARCH_BUDGET
-  const budget = createResearchBudget(limits)
+  const budget = createResearchBudget(limits, options.depth)
   const controller = new AbortController()
   const timer = setTimeout(
     () => controller.abort(new DOMException("研究工作流超时", "TimeoutError")),
@@ -102,6 +104,7 @@ export async function runResearchWorkflow(input: {
       budget: limits,
       toolsBudget: budget,
       sourceScope: options.sourceScope,
+      depth: options.depth,
     })
     const maxRounds =
       options.depth === "deep" ? 3 : options.depth === "quick" ? 1 : 2
@@ -130,19 +133,27 @@ export async function runResearchWorkflow(input: {
     const researchSignal = AbortSignal.any([signal, researchController.signal])
     for (let round = 0; round < maxRounds && !researchSignal.aborted; round++) {
       try {
+        budget.beginRound(round + 1)
+        const previousEvaluation = evaluations.at(-1)
+        const targetQuestions = previousEvaluation
+          ? plan.questions.filter((question) =>
+              previousEvaluation.missingQuestionIds.includes(question.id)
+            )
+          : plan.questions
         phase = "research"
         const result = await research.agent.stream({
           prompt: JSON.stringify({
             question: input.question,
             options,
             plan,
+            targetQuestions,
             round: round + 1,
             sources: research.listSources(),
             evidence: selectResearchEvidence(
               research.listSources(),
               research.listEvidence()
             ),
-            previousEvaluation: evaluations.at(-1),
+            previousEvaluation,
             budget: budget.snapshot(),
           }),
           abortSignal: researchSignal,

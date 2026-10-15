@@ -3,7 +3,7 @@ import "server-only"
 /**
  * 知识库文档服务。
  *
- * 负责文件上传、解析任务入队、原件下载和解析正文及资源读取。
+ * 负责文件上传处理、原件下载和解析正文及资源读取。
  * HTTP 接口只做参数校验，具体业务流程集中在这里，方便复用和测试。
  */
 
@@ -24,13 +24,16 @@ import {
   requireOwnedKnowledgeBase,
   lockOwnedKnowledgeBase,
 } from "@/lib/knowledge/ownership"
+import { DOCUMENT_PROCESSING_TIMEOUT_MS } from "@/lib/knowledge/documents/timeouts"
+import { cleanupKnowledgeResources } from "./cleanup"
+import { processKnowledgeDocument } from "./process-document"
+import { KnowledgeParseError } from "@/lib/knowledge/parsers/types"
 import { inspectKnowledgeFile } from "@/lib/knowledge/parsers/registry"
 import { titleFromFilename } from "@/lib/knowledge/parsers/normalize"
 import type {
   ReparseKnowledgeDocumentInput,
   RenameKnowledgeDocumentInput,
 } from "@/lib/knowledge/schemas"
-import { cancelDocumentJobs } from "@/lib/knowledge/management/service"
 import {
   deleteOssObject,
   getOssObject,
@@ -81,6 +84,7 @@ export const createKnowledgeDocumentUpload = async ({
   filename,
   mimeType,
   buffer,
+  signal,
 }: {
   userId: string
   knowledgeBaseId: string
@@ -88,7 +92,9 @@ export const createKnowledgeDocumentUpload = async ({
   filename: string
   mimeType: string
   buffer: Buffer
+  signal?: AbortSignal
 }) => {
+  signal?.throwIfAborted()
   // 先规范文件名并检查扩展名、MIME 和文件签名是否属于支持的格式。
   const originalFileName = sanitizeFilename(filename)
   const inspected = inspectKnowledgeFile({
@@ -114,16 +120,21 @@ export const createKnowledgeDocumentUpload = async ({
   const storageKey = `knowledge-documents/${userId}/${knowledgeBaseId}/${id}.${extension}`
 
   // 原文件放在 OSS，数据库只保存对象键、大小和哈希。
-  await putOssObject(storageKey, buffer, inspected.mimeType)
+  signal?.throwIfAborted()
+  let sourceUploaded = false
   try {
-    return await prisma.$transaction(async (db) => {
+    await putOssObject(storageKey, buffer, inspected.mimeType)
+    sourceUploaded = true
+    signal?.throwIfAborted()
+    await prisma.$transaction(async (db) => {
       // 与整库/目录删除串行，保证删除时能读到新文档的资源信息。
       await lockOwnedKnowledgeBase(db, userId, knowledgeBaseId)
       if (folderId)
         await requireFolderInKnowledgeBase(db, knowledgeBaseId, folderId)
 
-      // 文档记录和解析任务在同一事务中创建，避免出现没有任务的文档。
-      const document = await db.knowledgeDocument.create({
+      // 先保存原件记录；解析与索引在事务提交后直接执行。
+      signal?.throwIfAborted()
+      await db.knowledgeDocument.create({
         data: {
           id,
           knowledgeBaseId,
@@ -137,36 +148,135 @@ export const createKnowledgeDocumentUpload = async ({
           checksumSha256,
           storageKey,
         },
-        select: documentDetailSelect,
+        select: { id: true },
       })
 
-      await db.documentProcessingJob.create({
-        data: {
-          knowledgeBaseId,
-          documentId: id,
-          type: "PARSE",
-          status: "PENDING",
-          targetRevision: 0,
-          dedupeKey: `parse:${id}:${checksumSha256}`,
-          payload: {},
-        },
-      })
-      return document
+      signal?.throwIfAborted()
     })
   } catch (error) {
-    // 数据库写入失败时回收刚上传的文件，避免 OSS 出现孤儿对象。
-    await deleteOssObject(storageKey).catch(async () => {
-      // 删除期间上传的原件可能尚未入库；OSS 回收失败时用无外键任务继续清理。
-      await prisma.documentProcessingJob.create({
-        data: {
-          type: "CLEANUP",
-          dedupeKey: `cleanup:${id}:${checksumSha256}`,
-          payload: { storageKey, documentId: id, reason: "upload-failed" },
-        },
-      })
-    })
+    // 原件已上传时立即补偿删除；上传结果未确认时保留安全窗口后的清理记录。
+    const cleanup = {
+      type: "CLEANUP" as const,
+      dedupeKey: `cleanup:${id}:${checksumSha256}`,
+      availableAt: new Date(
+        Date.now() + (sourceUploaded ? 0 : DOCUMENT_PROCESSING_TIMEOUT_MS)
+      ),
+      payload: { storageKey, documentId: id, reason: "upload-failed" },
+    }
+    if (!sourceUploaded)
+      await prisma.documentProcessingJob.create({ data: cleanup })
+    else
+      await deleteOssObject(storageKey).catch(() =>
+        prisma.documentProcessingJob.create({ data: cleanup })
+      )
     throw error
   }
+
+  return processOwnedKnowledgeDocument(userId, id, 0, {
+    source: buffer,
+    signal,
+  })
+}
+
+/** 上传与重解析共用结果及失败补偿，具体阶段状态由处理函数维护。 */
+async function processOwnedKnowledgeDocument(
+  userId: string,
+  id: string,
+  initialRevision: number,
+  input: Pick<
+    Parameters<typeof processKnowledgeDocument>[0],
+    "source" | "signal" | "expectedContentRevision"
+  >
+) {
+  try {
+    await processKnowledgeDocument({
+      userId,
+      ...input,
+      documentId: id,
+    })
+  } catch (error) {
+    if (error instanceof KnowledgeError) {
+      if (error.code === "CONTENT_REVISION_CONFLICT")
+        await cleanupKnowledgeResources([id])
+      throw error
+    }
+    const document = await getOwnedKnowledgeDocument(userId, id)
+    const phase = document.contentRevision > initialRevision ? "index" : "parse"
+    // 阶段之间中止也要落入失败状态，避免留下无人接手的处理中记录。
+    const where = {
+      id,
+      deletedAt: null,
+      knowledgeBase: { userId, deletedAt: null },
+    }
+    if (
+      input.expectedContentRevision === undefined &&
+      document.status === "QUEUED" &&
+      document.contentRevision === initialRevision
+    ) {
+      await prisma.knowledgeDocument.updateMany({
+        where: { ...where, status: "QUEUED", contentRevision: initialRevision },
+        data: {
+          status: "FAILED",
+          parseErrorCode: "PARSE_FAILED",
+          parseErrorMessage:
+            error instanceof Error ? error.message : "文档处理失败",
+        },
+      })
+    } else if (
+      document.status === "READY" &&
+      document.contentRevision === initialRevision + 1 &&
+      document.chunkStatus === "PENDING"
+    ) {
+      await prisma.knowledgeDocument.updateMany({
+        where: {
+          ...where,
+          status: "READY",
+          chunkStatus: "PENDING",
+          contentRevision: initialRevision + 1,
+        },
+        data: {
+          chunkStatus: "FAILED",
+          chunkErrorMessage:
+            error instanceof Error ? error.message : "文档索引失败",
+        },
+      })
+    }
+    const cleanup = await cleanupKnowledgeResources([id])
+    input.signal?.throwIfAborted()
+    const failure = new KnowledgeError(
+      "KNOWLEDGE_DOCUMENT_PROCESSING_FAILED",
+      error instanceof KnowledgeParseError
+        ? error.message
+        : phase === "parse"
+          ? "文件已保存，但解析失败。请在文档中查看错误详情。"
+          : "文件和正文已保存，但索引失败。请在文档中查看错误详情。",
+      error instanceof KnowledgeParseError
+        ? error.status
+        : error instanceof Error && error.name === "TimeoutError"
+          ? 504
+          : 502,
+      {
+        documentId: id,
+        phase,
+        cleanupPending: cleanup.failed + cleanup.pending,
+      }
+    )
+    failure.cause = error
+    throw failure
+  }
+  const cleanup = await cleanupKnowledgeResources([id])
+  if (cleanup.failed || cleanup.pending)
+    throw new KnowledgeError(
+      "KNOWLEDGE_CLEANUP_FAILED",
+      "文档解析和索引已完成，但旧资源尚未清理完成，请联系管理员处理",
+      502,
+      {
+        documentId: id,
+        phase: "cleanup",
+        cleanupPending: cleanup.failed + cleanup.pending,
+      }
+    )
+  return getOwnedKnowledgeDocument(userId, id)
 }
 
 export const getOwnedKnowledgeDocument = async (userId: string, id: string) => {
@@ -264,86 +374,17 @@ export const getOwnedKnowledgeFilePreview = async (
   }
 }
 
-/** 只登记 REPARSE 任务，Worker 成功后才替换正文并增加 contentRevision。 */
+/** 按用户确认的版本重新解析并建立索引，全部完成后才返回。 */
 export const reparseKnowledgeDocument = async (
   userId: string,
   id: string,
-  input: ReparseKnowledgeDocumentInput
+  input: ReparseKnowledgeDocumentInput,
+  signal?: AbortSignal
 ) =>
-  prisma.$transaction(
-    async (db) => {
-      const where = {
-        id,
-        deletedAt: null,
-        knowledgeBase: { userId, deletedAt: null },
-      }
-      const initial = await db.knowledgeDocument.findFirst({
-        where,
-        select: { knowledgeBaseId: true },
-      })
-      if (!initial) throw knowledgeDocumentNotFound()
-      await lockOwnedKnowledgeBase(db, userId, initial.knowledgeBaseId)
-      const document = await db.knowledgeDocument.findFirst({
-        where,
-        select: { ...documentDetailSelect, storageKey: true },
-      })
-      if (!document) throw knowledgeDocumentNotFound()
-      if (
-        !document.storageKey ||
-        !document.originalFileName ||
-        !document.mimeType
-      )
-        throw new KnowledgeError(
-          "KNOWLEDGE_DOCUMENT_NO_ORIGINAL",
-          "文档没有可重新解析的原件",
-          409
-        )
-      if (document.status === "QUEUED" || document.status === "PARSING")
-        throw new KnowledgeError(
-          "KNOWLEDGE_DOCUMENT_PROCESSING",
-          "文档正在解析，请等待当前任务完成",
-          409
-        )
-
-      // 核对确认时的正文版本，阻止旧标签页覆盖已完成的新解析结果。
-      const updated = await db.knowledgeDocument.updateMany({
-        where: {
-          ...where,
-          status: { in: ["READY", "FAILED"] },
-          contentRevision: input.expectedContentRevision,
-        },
-        data: {
-          status: "QUEUED",
-          parseErrorCode: null,
-          parseErrorMessage: null,
-        },
-      })
-      if (updated.count !== 1)
-        throw new KnowledgeError(
-          "CONTENT_REVISION_CONFLICT",
-          "正文版本已变化，请重新加载后再确认解析",
-          409
-        )
-      await cancelDocumentJobs(db, [id])
-      await db.documentProcessingJob.create({
-        data: {
-          documentId: id,
-          knowledgeBaseId: document.knowledgeBaseId,
-          type: "REPARSE",
-          status: "PENDING",
-          targetRevision: document.contentRevision,
-          // 失败后允许重新发起；重复点击由同库事务锁和 QUEUED 状态阻止。
-          dedupeKey: `reparse:${id}:${randomUUID()}`,
-          payload: {},
-        },
-      })
-      return db.knowledgeDocument.findUniqueOrThrow({
-        where: { id },
-        select: documentDetailSelect,
-      })
-    },
-    { isolationLevel: "ReadCommitted", maxWait: 5_000, timeout: 10_000 }
-  )
+  processOwnedKnowledgeDocument(userId, id, input.expectedContentRevision, {
+    expectedContentRevision: input.expectedContentRevision,
+    signal,
+  })
 
 export const readOwnedKnowledgeDocumentAsset = async (
   userId: string,

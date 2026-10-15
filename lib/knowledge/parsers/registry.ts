@@ -70,7 +70,7 @@ const hasDocxSignature = (buffer: Buffer) =>
   buffer.subarray(0, 2).equals(Buffer.from("PK")) &&
   buffer.includes(Buffer.from("word/document.xml"))
 
-/** Worker 已知内部类型时，直接取得对应解析器。 */
+/** 处理流程已知内部类型时，直接取得对应解析器。 */
 export const getKnowledgeParser = (kind: KnowledgeSourceKind) => parsers[kind]
 
 /**

@@ -168,7 +168,7 @@ export async function searchKeywordChunks({
   })
 }
 
-/** 删除由原有 CLEANUP 队列重试；索引不存在代表已清理，不创建空索引。 */
+/** 删除失败保留资源清单供补偿；索引不存在代表已清理，不创建空索引。 */
 export async function deleteKnowledgeChunks(documentId: string) {
   const client = getEsClient()
   if (!(await client.indices.exists({ index: KNOWLEDGE_CHUNK_INDEX }))) return

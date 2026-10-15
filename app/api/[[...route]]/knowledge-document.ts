@@ -100,9 +100,10 @@ export const knowledgeDocumentRoute = new Hono()
         const document = await reparseKnowledgeDocument(
           c.get("user").id,
           c.req.valid("param").id,
-          c.req.valid("json")
+          c.req.valid("json"),
+          c.req.raw.signal
         )
-        return c.json({ success: true, document }, 202)
+        return c.json({ success: true, document })
       })
   )
   .delete(
@@ -115,7 +116,9 @@ export const knowledgeDocumentRoute = new Hono()
           c.get("user").id,
           c.req.valid("param").id
         )
-        return c.json({ success: true, ...deleted })
+        const complete =
+          deleted.cleanup.failed === 0 && deleted.cleanup.pending === 0
+        return c.json({ success: complete, ...deleted }, complete ? 200 : 207)
       })
   )
   .get(
@@ -152,6 +155,7 @@ export const knowledgeDocumentRoute = new Hono()
       runKnowledgeApi(async () => {
         const user = c.get("user")
         const { id } = c.req.valid("param")
+        //查询用户拥有的知识文档详情
         const document = await getOwnedKnowledgeDocument(user.id, id)
         return c.json({ success: true, document })
       })

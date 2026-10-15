@@ -96,7 +96,9 @@ export function DocumentPreview({
   const document = query.data.document
   const showOriginal = document.type !== "MARKDOWN"
   const processing =
-    document.status === "QUEUED" || document.status === "PARSING"
+    document.status === "QUEUED" ||
+    document.status === "PARSING" ||
+    document.chunkStatus === "RUNNING"
   return (
     <article className="flex h-full min-h-0 flex-col">
       <div className="space-y-2 border-b p-5">
@@ -110,6 +112,16 @@ export function DocumentPreview({
             {documentStatusLabels[document.status]}
           </Badge>
           <Badge variant="outline">{document.type}</Badge>
+          {processing && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={query.isFetching || reparse.isPending}
+              onClick={() => query.refetch()}
+            >
+              重新读取
+            </Button>
+          )}
           {!showOriginal && onPreviewOriginal && document.originalFileName && (
             <Button variant="outline" size="sm" onClick={onPreviewOriginal}>
               <Eye />
@@ -172,6 +184,7 @@ export function DocumentPreview({
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 variant="destructive"
+                disabled={processing}
                 onSelect={() => {
                   deletion.reset()
                   setConfirmation({
@@ -190,6 +203,16 @@ export function DocumentPreview({
           {document.originalFileName}
           {!showOriginal && " · Markdown 文档"}
         </p>
+        {document.chunkStatus === "FAILED" && (
+          <p role="alert" className="text-sm text-destructive">
+            索引建立失败：{document.chunkErrorMessage}
+          </p>
+        )}
+        {showOriginal && document.status === "FAILED" && (
+          <p role="alert" className="text-sm text-destructive">
+            文档解析失败：{document.parseErrorMessage}
+          </p>
+        )}
         {/* 后台读取失败时保留已加载的正文，并明确显示错误。 */}
         {query.isError && (
           <p role="alert" className="text-sm text-destructive">
@@ -223,11 +246,13 @@ export function DocumentPreview({
               <div>
                 <p>
                   {document.status === "QUEUED"
-                    ? "等待解析任务执行"
-                    : "正在转换为 Markdown"}
+                    ? "正在准备解析"
+                    : document.chunkStatus === "RUNNING"
+                      ? "正在建立检索索引"
+                      : "正在转换为 Markdown"}
                 </p>
                 <p className="mt-1 text-muted-foreground">
-                  完成后会自动显示正文，请确保文档 Worker 已启动。
+                  文件正在处理中，可在操作完成后重新读取最新正文。
                 </p>
               </div>
             </div>
@@ -292,8 +317,8 @@ export function DocumentPreview({
             </DialogTitle>
             <DialogDescription>
               {confirmation?.action === "reparse"
-                ? `将从原件重新解析「${document.title}」。成功后更新当前正文；失败不会清除现有正文。`
-                : `将删除「${document.title}」，取消解析任务，并由 Worker 清理原件和解析图片。此操作不可撤销。`}
+                ? `将从原件重新解析「${document.title}」并重建索引。处理可能需要几分钟；解析失败会保留现有正文。`
+                : `将删除「${document.title}」，清理原件、解析图片和检索索引。此操作不可撤销。`}
             </DialogDescription>
           </DialogHeader>
           {actionError && (
@@ -302,6 +327,11 @@ export function DocumentPreview({
               {actionError instanceof KnowledgeRequestError &&
                 actionError.status === 409 &&
                 " 请关闭对话框并重新读取最新文档后再操作。"}
+            </p>
+          )}
+          {reparse.isPending && (
+            <p role="status" className="text-sm text-muted-foreground">
+              正在重新解析并建立索引，请保持页面打开。
             </p>
           )}
           <DialogFooter>
@@ -341,25 +371,31 @@ export function DocumentPreview({
                     {
                       onSuccess: () => {
                         setConfirmation(null)
-                        toast.success(
-                          "重新解析已排队，请确保文档 Worker 已启动"
-                        )
+                        toast.success("重新解析和索引已完成")
                       },
                     }
                   )
                 } else {
                   deletion.mutate(undefined, {
-                    onSuccess: () => {
+                    onSuccess: ({ cleanup }) => {
                       setConfirmation(null)
                       onDeleted?.()
-                      toast.success("文档已删除，原件和图片由 Worker 后续清理")
+                      if (cleanup.failed || cleanup.pending)
+                        toast.warning(
+                          "文档已删除，但部分资源尚未清理完成，请联系管理员处理"
+                        )
+                      else toast.success("文档和相关资源已删除")
                     },
                   })
                 }
               }}
             >
               {changingDocument && <LoaderCircle className="animate-spin" />}
-              {confirmation?.action === "reparse" ? "确认重新解析" : "确认删除"}
+              {confirmation?.action === "reparse"
+                ? reparse.isPending
+                  ? "正在重新解析…"
+                  : "确认重新解析"
+                : "确认删除"}
             </Button>
           </DialogFooter>
         </DialogContent>

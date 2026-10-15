@@ -16,6 +16,7 @@ export const markdownParser: KnowledgeDocumentParser = {
   kind: "markdown",
   version: "markdown-pass-through@1",
   async parse(input, context) {
+    context.signal?.throwIfAborted()
     // Markdown 已经是目标格式，因此解码后直接作为 canonical content。
     const markdown = decodeTextBuffer(input).trim()
     if (!markdown) {

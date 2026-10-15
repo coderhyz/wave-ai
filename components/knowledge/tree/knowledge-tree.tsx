@@ -59,15 +59,24 @@ export function KnowledgeTreeView(props: TreeProps) {
     setAction({ item, type })
   }
 
+  function notifyDeletion(
+    message: string,
+    cleanup: { failed: number; pending: number }
+  ) {
+    if (cleanup.failed || cleanup.pending)
+      toast.warning("记录已删除，但部分资源尚未清理完成，请联系管理员处理")
+    else toast.success(message)
+  }
+
   function remove() {
     if (!action) return
     const { item } = action
     if (item.kind === "base") {
       deleteBase.mutate(undefined, {
-        onSuccess: () => {
+        onSuccess: ({ deleted }) => {
           setAction(null)
           props.onKnowledgeBaseDeleted()
-          toast.success("知识库已删除，系统将清理原件和图片")
+          notifyDeletion("知识库和相关资源已删除", deleted.cleanup)
         },
       })
     } else if (item.kind === "folder") {
@@ -83,16 +92,16 @@ export function KnowledgeTreeView(props: TreeProps) {
           )
             props.onSelectionDeleted(folderDeleted)
           setAction(null)
-          toast.success("目录及其中的文件已删除，Worker 将清理原件和图片")
+          notifyDeletion("目录、文件和相关资源已删除", deleted.cleanup)
         },
       })
     } else {
       deleteDocument.mutate(undefined, {
-        onSuccess: () => {
+        onSuccess: ({ cleanup }) => {
           if (item.id === props.selectedDocumentId)
             props.onSelectionDeleted(false)
           setAction(null)
-          toast.success("文件已删除，Worker 将清理原件和图片")
+          notifyDeletion("文件和相关资源已删除", cleanup)
         },
       })
     }

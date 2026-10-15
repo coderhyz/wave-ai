@@ -38,8 +38,9 @@ export interface ParsedMarkdownDocument {
   warnings: string[]
 }
 
-/** Worker 调用解析器时提供的文件信息和可选图片上传能力。 */
+/** 文档处理流程调用解析器时提供的文件信息、中止信号和图片上传能力。 */
 export interface ParseContext {
+  signal?: AbortSignal
   filename: string
   mimeType: string
   uploadAsset?: (asset: {

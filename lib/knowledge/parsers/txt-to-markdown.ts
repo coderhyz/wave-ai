@@ -18,6 +18,7 @@ export const txtParser: KnowledgeDocumentParser = {
   kind: "txt",
   version: "txt-to-markdown@1",
   async parse(input, context) {
+    context.signal?.throwIfAborted()
     // 先把二进制文件解码成可信文本，并拒绝空文件。
     const decoded = decodeTextBuffer(input).trim()
     if (!decoded) {

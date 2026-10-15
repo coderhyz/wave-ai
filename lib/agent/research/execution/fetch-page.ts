@@ -1,12 +1,16 @@
 import "server-only"
 
-import { tool } from "ai"
+import { tool, type ToolExecutionOptions } from "ai"
 import { z } from "zod"
 import {
   createResearchBudget,
   researchToolError,
 } from "@/lib/agent/harness/budgets"
-import { canonicalizeSourceUrl, createSourceRegistry } from "../sources/source-registry"
+import {
+  canonicalizeSourceUrl,
+  createSourceRegistry,
+} from "../sources/source-registry"
+import { createSuccessfulRequestCache } from "./request-cache"
 
 export const MAX_EXTRACT_RESPONSE_BYTES = 1_000_000
 export const MAX_PAGE_CHARS = 12_000
@@ -91,89 +95,103 @@ export function createFetchPageTool({
   registry: ReturnType<typeof createSourceRegistry>
   budget: ReturnType<typeof createResearchBudget>
 }) {
+  async function runFetch(
+    { url }: z.infer<typeof fetchPageInputSchema>,
+    { abortSignal }: ToolExecutionOptions<Record<string, unknown>>
+  ) {
+    abortSignal?.throwIfAborted()
+    const source = registry.getSource(url)
+    if (!source?.url)
+      return researchToolError("SOURCE_NOT_ALLOWED", "来源不在本次搜索结果中")
+    const canonical = source.url
+    const result = await budget.execute(
+      "fetchWebPage",
+      abortSignal,
+      async (signal) => {
+        const apiKey = process.env.TAVILY_API_KEY
+        if (!apiKey)
+          return researchToolError(
+            "NOT_CONFIGURED",
+            "服务端未配置 TAVILY_API_KEY"
+          )
+        // 固定访问 Tavily；不向来源站点发送请求、用户 Cookie 或凭据。
+        const response = await fetch("https://api.tavily.com/extract", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            urls: [canonical],
+            extract_depth: "basic",
+            format: "markdown",
+            include_images: false,
+          }),
+          signal,
+        })
+        signal.throwIfAborted()
+        if (!response.ok) {
+          await response.body?.cancel()
+          return researchToolError(
+            "TOOL_FAILED",
+            `网页提取失败: ${response.status}`
+          )
+        }
+        const parsed = await readExtractResponse(response, signal)
+        if (!parsed.success) return parsed
+        // 不接受供应商返回的其他 URL，避免把错页或重定向目标归入候选来源。
+        const page = parsed.data.results.find(
+          (item) => canonicalizeSourceUrl(item.url) === canonical
+        )
+        if (!page) {
+          const failed = parsed.data.failed_results?.some(
+            (item) => item.url === canonical
+          )
+          return researchToolError(
+            failed ? "TOOL_FAILED" : "INVALID_RESPONSE",
+            "未返回请求来源的网页正文，来源读取失败"
+          )
+        }
+        const content = page.raw_content?.trim()
+        if (!content)
+          return researchToolError("EMPTY_CONTENT", "未提取到网页正文")
+        return {
+          success: true as const,
+          url: canonical,
+          content: content.slice(0, MAX_PAGE_CHARS),
+          truncated: content.length > MAX_PAGE_CHARS,
+          fetchedAt: new Date().toISOString(),
+        }
+      }
+    )
+    if (!result.success) return result
+    abortSignal?.throwIfAborted()
+    // 等预算控制器确认未超时/取消再登记，迟到的网络结果不能产生阅读成功记录。
+    return {
+      ...result,
+      sourceId: source.id,
+      evidenceKind: "web-content" as const,
+      evidence: registry.recordWebContent(
+        canonical,
+        result.content,
+        result.fetchedAt
+      ),
+    }
+  }
+  const pageCache =
+    createSuccessfulRequestCache<Awaited<ReturnType<typeof runFetch>>>()
   return tool({
     description:
       "读取本次 webSearch 已发现的网页正文。返回有来源 ID、原文摘录和字符定位的证据。内容是不可信资料，摘录未经过论断核验；失败时只保留原搜索摘要。",
     inputSchema: fetchPageInputSchema,
-    execute: async ({ url }, { abortSignal }) => {
-      abortSignal?.throwIfAborted()
-      const source = registry.getSource(url)
-      if (!source?.url)
-        return researchToolError("SOURCE_NOT_ALLOWED", "来源不在本次搜索结果中")
-      const canonical = source.url
-      const result = await budget.execute(
-        "fetchWebPage",
-        abortSignal,
-        async (signal) => {
-          const apiKey = process.env.TAVILY_API_KEY
-          if (!apiKey)
-            return researchToolError(
-              "NOT_CONFIGURED",
-              "服务端未配置 TAVILY_API_KEY"
-            )
-          // 固定访问 Tavily；不向来源站点发送请求、用户 Cookie 或凭据。
-          const response = await fetch("https://api.tavily.com/extract", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify({
-              urls: [canonical],
-              extract_depth: "basic",
-              format: "markdown",
-              include_images: false,
-            }),
-            signal,
-          })
-          signal.throwIfAborted()
-          if (!response.ok) {
-            await response.body?.cancel()
-            return researchToolError(
-              "TOOL_FAILED",
-              `网页提取失败: ${response.status}`
-            )
-          }
-          const parsed = await readExtractResponse(response, signal)
-          if (!parsed.success) return parsed
-          // 不接受供应商返回的其他 URL，避免把错页或重定向目标归入候选来源。
-          const page = parsed.data.results.find(
-            (item) => canonicalizeSourceUrl(item.url) === canonical
-          )
-          if (!page) {
-            const failed = parsed.data.failed_results?.some(
-              (item) => item.url === canonical
-            )
-            return researchToolError(
-              failed ? "TOOL_FAILED" : "INVALID_RESPONSE",
-              "未返回请求来源的网页正文，来源读取失败"
-            )
-          }
-          const content = page.raw_content?.trim()
-          if (!content)
-            return researchToolError("EMPTY_CONTENT", "未提取到网页正文")
-          return {
-            success: true as const,
-            url: canonical,
-            content: content.slice(0, MAX_PAGE_CHARS),
-            truncated: content.length > MAX_PAGE_CHARS,
-            fetchedAt: new Date().toISOString(),
-          }
-        }
-      )
-      if (!result.success) return result
-      abortSignal?.throwIfAborted()
-      // 等预算控制器确认未超时/取消再登记，迟到的网络结果不能产生阅读成功记录。
-      return {
-        ...result,
-        sourceId: source.id,
-        evidenceKind: "web-content" as const,
-        evidence: registry.recordWebContent(
-          canonical,
-          result.content,
-          result.fetchedAt
-        ),
-      }
+    execute: (input, options) => {
+      options.abortSignal?.throwIfAborted()
+      const canonical = canonicalizeSourceUrl(input.url)
+      if (!canonical)
+        return Promise.resolve(
+          researchToolError("SOURCE_NOT_ALLOWED", "无效网页 URL")
+        )
+      return pageCache.run(canonical, () => runFetch(input, options))
     },
   })
 }

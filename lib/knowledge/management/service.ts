@@ -2,14 +2,16 @@
  * 知识库与文件夹领域服务。
  * 集中处理所有权校验、目录层级、排序和删除事务，供 API 路由调用。
  */
-import type { Prisma } from "@/app/generated/prisma"
+import type { DocumentChunkStatus, Prisma } from "@/app/generated/prisma"
 import prisma from "@/lib/prisma"
-import { DOCUMENT_JOB_LEASE_MS } from "@/lib/knowledge/jobs/lease"
+import { DOCUMENT_PROCESSING_TIMEOUT_MS } from "@/lib/knowledge/documents/timeouts"
+import { cleanupKnowledgeResources } from "@/lib/knowledge/documents/cleanup"
 import {
   getKnowledgeAssetNames,
   getKnowledgeAssetStorageKey,
 } from "@/lib/knowledge/documents/assets"
 import {
+  KnowledgeError,
   knowledgeFolderCycle,
   knowledgeFolderNotEmpty,
   knowledgeDocumentNotFound,
@@ -110,62 +112,36 @@ const getFolderSubtreeIds = async (
   return [...visited]
 }
 
-/** 删除文档前取消尚未结束的解析、重解析和分块任务。 */
-export const cancelDocumentJobs = async (
+/** 删除和处理使用同一知识库锁；先拒绝在途写入，再登记资源清单。 */
+const assertDocumentsIdle = async (
   db: KnowledgeTransaction,
   documentIds: string[]
 ) => {
-  if (documentIds.length === 0) return
-
-  /** CLEANUP 任务不能取消，否则已经登记的原文件将无法被后续 Worker 回收。 */
-  await db.documentProcessingJob.updateMany({
+  if (!documentIds.length) return
+  const busy = await db.knowledgeDocument.findFirst({
     where: {
-      documentId: { in: documentIds },
-      type: { in: ["PARSE", "REPARSE", "RECHUNK"] },
-      status: { in: ["PENDING", "RUNNING"] },
+      id: { in: documentIds },
+      OR: [
+        { status: { in: ["QUEUED", "PARSING"] } },
+        { chunkStatus: "RUNNING" },
+        {
+          jobs: {
+            some: {
+              type: { in: ["PARSE", "REPARSE", "RECHUNK"] },
+              status: "RUNNING",
+            },
+          },
+        },
+      ],
     },
-    data: {
-      status: "CANCELLED",
-      lockedAt: null,
-      lockedUntil: null,
-      lockToken: null,
-    },
+    select: { id: true },
   })
-}
-
-/** 与正文更新处于同一事务；取消旧版本，重试登记时不重复创建任务。 */
-export const registerRechunkJob = async (
-  db: KnowledgeTransaction,
-  document: { id: string; knowledgeBaseId: string; contentRevision: number }
-) => {
-  await db.documentProcessingJob.updateMany({
-    where: {
-      documentId: document.id,
-      type: "RECHUNK",
-      targetRevision: { lt: document.contentRevision },
-      status: { in: ["PENDING", "RUNNING"] },
-    },
-    data: {
-      status: "CANCELLED",
-      lockedAt: null,
-      lockedUntil: null,
-      lockToken: null,
-    },
-  })
-  await db.documentProcessingJob.createMany({
-    skipDuplicates: true,
-    data: [
-      {
-        knowledgeBaseId: document.knowledgeBaseId,
-        documentId: document.id,
-        type: "RECHUNK",
-        status: "PENDING",
-        targetRevision: document.contentRevision,
-        dedupeKey: `rechunk:${document.id}:${document.contentRevision}`,
-        payload: {},
-      },
-    ],
-  })
+  if (busy)
+    throw new KnowledgeError(
+      "KNOWLEDGE_DOCUMENT_PROCESSING",
+      "包含正在处理的文档，请等待解析和索引结束后再删除",
+      409
+    )
 }
 
 /**
@@ -180,6 +156,8 @@ export const registerCleanupJobs = async (
     storageKey: string | null
     checksumSha256: string | null
     parseMetadata: Prisma.JsonValue | null
+    chunkStatus: DocumentChunkStatus
+    updatedAt: Date
   }>,
   reason:
     | "knowledge-base-delete"
@@ -223,8 +201,16 @@ export const registerCleanupJobs = async (
         type: "CLEANUP" as const,
         status: "PENDING" as const,
         dedupeKey: `cleanup:es:${document.id}`,
-        // 等已取消的索引任务租约耗尽，避免清理后仍有在途 ES 写入。
-        availableAt: new Date(Date.now() + DOCUMENT_JOB_LEASE_MS),
+        // 索引失败可能有服务端未确认的写入，保留安全窗口后再补偿；其余立即执行。
+        availableAt:
+          document.chunkStatus === "FAILED"
+            ? new Date(
+                Math.max(
+                  Date.now(),
+                  document.updatedAt.getTime() + DOCUMENT_PROCESSING_TIMEOUT_MS
+                )
+              )
+            : new Date(),
         payload: { target: "elasticsearch", documentId: document.id, reason },
       },
     ]
@@ -239,9 +225,9 @@ export const registerCleanupJobs = async (
   }
 }
 
-/** 单文档删除复用整库/目录删除的事务与清理任务，不在 HTTP 请求内直接删除 OSS。 */
-export const deleteKnowledgeDocument = async (userId: string, id: string) =>
-  prisma.$transaction(async (db) => {
+/** 先提交删除及资源清单，再在事务外立即清理 OSS 和 ES。 */
+export const deleteKnowledgeDocument = async (userId: string, id: string) => {
+  const deleted = await prisma.$transaction(async (db) => {
     const where = {
       id,
       deletedAt: null,
@@ -262,9 +248,12 @@ export const deleteKnowledgeDocument = async (userId: string, id: string) =>
         storageKey: true,
         checksumSha256: true,
         parseMetadata: true,
+        chunkStatus: true,
+        updatedAt: true,
       },
     })
     if (!document) throw knowledgeDocumentNotFound()
+    await assertDocumentsIdle(db, [id])
     await registerCleanupJobs(db, [document], "document-delete")
     // 删除任务行使在途解析/索引无法提交；CLEANUP 通过 payload 独立执行。
     await db.documentProcessingJob.deleteMany({
@@ -278,6 +267,8 @@ export const deleteKnowledgeDocument = async (userId: string, id: string) =>
       deletedAt: new Date(),
     }
   }, organizationTransactionOptions)
+  return { ...deleted, cleanup: await cleanupKnowledgeResources([id]) }
+}
 
 /** 查询当前用户所有未删除的知识库，并附带有效目录数和文档数。 */
 export const listKnowledgeBases = async (userId: string) =>
@@ -340,11 +331,14 @@ const deleteKnowledgeBaseRecords = async (
       storageKey: true,
       checksumSha256: true,
       parseMetadata: true,
+      chunkStatus: true,
+      updatedAt: true,
     },
   })
   const documentIds = documents.map(({ id }) => id)
 
   /** 先登记资源清理，再删除处理任务，阻止在途任务提交。 */
+  await assertDocumentsIdle(db, documentIds)
   await registerCleanupJobs(db, documents, "knowledge-base-delete")
   await db.documentProcessingJob.deleteMany({
     where: { knowledgeBaseId, type: { not: "CLEANUP" } },
@@ -374,18 +368,23 @@ const deleteKnowledgeBaseRecords = async (
 export const deleteKnowledgeBase = async (
   userId: string,
   knowledgeBaseId: string
-) =>
-  prisma.$transaction(async (db) => {
+) => {
+  const deleted = await prisma.$transaction(async (db) => {
     await lockOwnedKnowledgeBase(db, userId, knowledgeBaseId)
     return deleteKnowledgeBaseRecords(db, knowledgeBaseId)
   }, organizationTransactionOptions)
+  return {
+    ...deleted,
+    cleanup: await cleanupKnowledgeResources(deleted.documentIds),
+  }
+}
 
 /** 仅供一次性本地清理命令使用；不挂载 HTTP 接口，只允许清理已软删除的根节点。 */
-export const purgeDeletedKnowledgeBase = async (knowledgeBaseId: string) =>
-  prisma.$transaction(async (db) => {
+export const purgeDeletedKnowledgeBase = async (knowledgeBaseId: string) => {
+  const deleted = await prisma.$transaction(async (db) => {
     await db.$queryRaw`
-      SELECT pg_advisory_xact_lock(hashtextextended(${knowledgeBaseId}, 0))::text
-    `
+    SELECT pg_advisory_xact_lock(hashtextextended(${knowledgeBaseId}, 0))::text
+  `
     const deletedBase = await db.knowledgeBase.findFirst({
       where: { id: knowledgeBaseId, deletedAt: { not: null } },
       select: { id: true },
@@ -403,7 +402,7 @@ export const purgeDeletedKnowledgeBase = async (knowledgeBaseId: string) =>
       data: {
         status: "PENDING",
         attempts: 0,
-        availableAt: new Date(Date.now() + DOCUMENT_JOB_LEASE_MS),
+        availableAt: new Date(Date.now() + DOCUMENT_PROCESSING_TIMEOUT_MS),
         lockedAt: null,
         lockedUntil: null,
         lockToken: null,
@@ -412,6 +411,13 @@ export const purgeDeletedKnowledgeBase = async (knowledgeBaseId: string) =>
     })
     return deleteKnowledgeBaseRecords(db, knowledgeBaseId)
   }, organizationTransactionOptions)
+  return deleted
+    ? {
+        ...deleted,
+        cleanup: await cleanupKnowledgeResources(deleted.documentIds),
+      }
+    : null
+}
 
 /**
  * 返回构建左侧文件树所需的知识库、目录和文档摘要。
@@ -547,8 +553,8 @@ export const deleteKnowledgeFolder = async (
   userId: string,
   folderId: string,
   recursive: boolean
-) =>
-  prisma.$transaction(async (db) => {
+) => {
+  const deleted = await prisma.$transaction(async (db) => {
     /** 与目录移动相同：先确定所属知识库，获取结构锁后再读取最新目录。 */
     const initialFolder = await requireOwnedKnowledgeFolder(
       db,
@@ -576,6 +582,8 @@ export const deleteKnowledgeFolder = async (
         storageKey: true,
         checksumSha256: true,
         parseMetadata: true,
+        chunkStatus: true,
+        updatedAt: true,
       },
     })
 
@@ -590,6 +598,7 @@ export const deleteKnowledgeFolder = async (
     const documentIds = documents.map(({ id }) => id)
 
     /** 先持久化资源信息，再删除文档和目录；所有步骤处于同一个事务。 */
+    await assertDocumentsIdle(db, documentIds)
     await registerCleanupJobs(db, documents, "folder-delete")
     await db.documentProcessingJob.deleteMany({
       where: { documentId: { in: documentIds }, type: { not: "CLEANUP" } },
@@ -610,3 +619,8 @@ export const deleteKnowledgeFolder = async (
       documentIds,
     }
   }, organizationTransactionOptions)
+  return {
+    ...deleted,
+    cleanup: await cleanupKnowledgeResources(deleted.documentIds),
+  }
+}

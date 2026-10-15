@@ -102,7 +102,7 @@ export function SourcePanel({
   return (
     <aside
       aria-label="来源面板"
-      className="relative z-10 flex min-h-0 shrink-0 flex-col border-l border-border/70 bg-background/95"
+      className="relative z-10 mt-3 flex min-h-0 shrink-0 flex-col border-l border-border/70 bg-background/95"
       style={{ width, maxWidth: "50%" }}
     >
       <div

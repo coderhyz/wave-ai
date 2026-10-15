@@ -43,39 +43,41 @@ export type CoverageEvaluation = {
   assessmentKind: "model-assisted" | "no-primary-evidence" | "not-evaluated"
 }
 
-/** 先核对真实来源与定位，再按来源轮流取 Top-K，避免单页占满上下文。 */
+/** 核对真实来源与定位，正文优先，各类内部按来源轮流分配上下文。 */
 export function selectResearchEvidence(
   sources: ResearchSource[],
   evidence: ResearchEvidence[],
   limit = 24
 ) {
-  const groups = sources.map((source) =>
-    evidence
-      .filter(
-        (item) =>
-          item.sourceId === source.id &&
-          item.excerpt.trim().length > 0 &&
-          item.locator.startChar >= 0 &&
-          item.locator.endChar - item.locator.startChar ===
-            item.excerpt.length &&
-          (item.evidenceKind !== "knowledge-chunk" ||
-            Boolean(item.locator.chunkId))
-      )
-      .sort(
-        (a, b) =>
-          Number(
-            ["search-summary", "paper-metadata"].includes(a.evidenceKind)
-          ) -
-          Number(["search-summary", "paper-metadata"].includes(b.evidenceKind))
-      )
+  const sourceIds = new Set(sources.map((source) => source.id))
+  const valid = evidence.filter(
+    (item) =>
+      sourceIds.has(item.sourceId) &&
+      item.excerpt.trim().length > 0 &&
+      item.locator.startChar >= 0 &&
+      item.locator.endChar - item.locator.startChar === item.excerpt.length &&
+      (item.evidenceKind !== "knowledge-chunk" || Boolean(item.locator.chunkId))
   )
   const selected: ResearchEvidence[] = []
-  for (let index = 0; selected.length < limit; index++) {
-    const items = groups.flatMap((group) =>
-      group[index] ? [group[index]] : []
-    )
-    if (!items.length) break
-    selected.push(...items.slice(0, limit - selected.length))
+  for (const primary of [true, false]) {
+    const groups = new Map<string, ResearchEvidence[]>()
+    for (const item of valid) {
+      const isPrimary =
+        item.evidenceKind === "web-content" ||
+        item.evidenceKind === "knowledge-chunk"
+      if (isPrimary !== primary) continue
+      const group = groups.get(item.sourceId) ?? []
+      group.push(item)
+      groups.set(item.sourceId, group)
+    }
+    const buckets = [...groups.values()]
+    for (let index = 0; selected.length < limit; index++) {
+      const items = buckets.flatMap((group) =>
+        group[index] ? [group[index]] : []
+      )
+      if (!items.length) break
+      selected.push(...items.slice(0, limit - selected.length))
+    }
   }
   return selected
 }
@@ -102,7 +104,10 @@ export async function evaluateCoverage(
   }
   let usage
   if (evidence.length) {
-    const settings = getChatGenerationSettings(input.modelId)
+    // Keep the short structured-output budget available for JSON, not reasoning.
+    const settings = getChatGenerationSettings(input.modelId, {
+      reasoning: false,
+    })
     const result = await generateText({
       model: myProvider.languageModel(input.modelId),
       ...settings,

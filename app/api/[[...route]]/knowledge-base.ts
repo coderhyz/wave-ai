@@ -84,7 +84,7 @@ export const knowledgeBaseRoute = new Hono()
         return c.json({ success: true, folder }, 201)
       })
   )
-  /** 上传原文件到 OSS，并登记异步 PARSE 任务。 */
+  /** 上传原文件到 OSS，等待解析和索引完成后返回。 */
   .post(
     "/:id/documents",
     getAuthUser,
@@ -132,8 +132,9 @@ export const knowledgeBaseRoute = new Hono()
           filename: file.name,
           mimeType: file.type,
           buffer: Buffer.from(await file.arrayBuffer()),
+          signal: c.req.raw.signal,
         })
-        return c.json({ success: true, document }, 202)
+        return c.json({ success: true, document }, 201)
       })
   )
   /** 修改知识库名称或描述。 */
@@ -164,6 +165,8 @@ export const knowledgeBaseRoute = new Hono()
         const user = c.get("user")
         const { id } = c.req.valid("param")
         const deleted = await deleteKnowledgeBase(user.id, id)
-        return c.json({ success: true, deleted })
+        const complete =
+          deleted.cleanup.failed === 0 && deleted.cleanup.pending === 0
+        return c.json({ success: complete, deleted }, complete ? 200 : 207)
       })
   )

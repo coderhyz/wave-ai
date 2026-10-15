@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { InferRequestType, InferResponseType } from "hono/client"
+import type { KnowledgeError } from "@/lib/knowledge/errors"
 import { api, fetchWithAuth } from "@/lib/hono/hono-rpc"
 import {
   decodeOriginalText,
@@ -206,7 +207,8 @@ export type KnowledgeDocument = InferResponseType<
 export class KnowledgeRequestError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    readonly details?: KnowledgeError["details"]
   ) {
     super(message)
     this.name = "KnowledgeRequestError"
@@ -218,8 +220,9 @@ async function throwRequestError(response: Response): Promise<never> {
     const body = await response.json()
     throw new KnowledgeRequestError(
       (typeof body.error === "string" ? body.error : body.error?.message) ??
-      `请求失败（${response.status}）`,
-      response.status
+        `请求失败（${response.status}）`,
+      response.status,
+      typeof body.error === "object" ? body.error?.details : undefined
     )
   }
   throw new KnowledgeRequestError(
@@ -228,7 +231,7 @@ async function throwRequestError(response: Response): Promise<never> {
   )
 }
 
-/** 重解析入队后继续沿用详情轮询；不乐观地伪造解析成功。 */
+/** 重解析等待实际处理结束；失败也刷新正文与目录，显示实际状态。 */
 export function useReparseKnowledgeDocument(documentId: string) {
   const queryClient = useQueryClient()
   return useMutation({
@@ -250,10 +253,13 @@ export function useReparseKnowledgeDocument(documentId: string) {
         queryKey: ["knowledge-document", documentId],
       })
       queryClient.setQueryData(["knowledge-document", documentId], data)
-      queryClient.invalidateQueries({
-        queryKey: ["knowledge-tree", data.document.knowledgeBaseId],
-      })
     },
+    onError: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["knowledge-document", documentId],
+      }),
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: ["knowledge-tree"] }),
   })
 }
 
@@ -337,18 +343,10 @@ export function useKnowledgeTree(knowledgeBaseId: string) {
       return response.json()
     },
     retry: false,
-    // 目录摘要也随任务刷新，未被选中的文档不会一直显示旧状态。
-    refetchInterval: (query) =>
-      !query.state.error &&
-        query.state.data?.documents.some(
-          ({ status }) => status === "QUEUED" || status === "PARSING"
-        )
-        ? 3000
-        : false,
   })
 }
 
-/** 切换文档时取消旧请求；终态或请求失败后停止轮询，由用户手动重新读取。 */
+/** 切换文档时取消旧读取请求；操作完成后由 Mutation 更新或刷新详情。 */
 export function useKnowledgeDocument(documentId: string) {
   return useQuery({
     queryKey: ["knowledge-document", documentId],
@@ -362,18 +360,6 @@ export function useKnowledgeDocument(documentId: string) {
       return response.json()
     },
     retry: false,
-    // 复用详情接口读取任务状态，不另建状态 API 或定时器。
-    refetchInterval: (query) => {
-      const status = query.state.data?.document.status
-      const chunkStatus = query.state.data?.document.chunkStatus
-      return !query.state.error &&
-        (status === "QUEUED" ||
-          status === "PARSING" ||
-          (status === "READY" &&
-            (chunkStatus === "PENDING" || chunkStatus === "RUNNING")))
-        ? 3000
-        : false
-    },
   })
 }
 
@@ -418,7 +404,7 @@ export function useCreateKnowledgeFolder(knowledgeBaseId: string) {
   })
 }
 
-/** 上传返回排队中的文档，先写入详情缓存，再由详情和文件树继续轮询。 */
+/** 上传等待解析与索引完成；失败也刷新目录以显示已保存的文档。 */
 export function useUploadKnowledgeDocument(knowledgeBaseId: string) {
   const queryClient = useQueryClient()
   return useMutation({
@@ -446,12 +432,27 @@ export function useUploadKnowledgeDocument(knowledgeBaseId: string) {
         document: KnowledgeDocument
       }
     },
-    onSuccess: (data) => {
-      queryClient.setQueryData(["knowledge-document", data.document.id], data)
-      queryClient.invalidateQueries({
-        queryKey: ["knowledge-tree", data.document.knowledgeBaseId],
+    retry: false,
+    onSuccess: async (data) => {
+      await queryClient.cancelQueries({
+        queryKey: ["knowledge-document", data.document.id],
       })
-      queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] })
+      queryClient.setQueryData(["knowledge-document", data.document.id], data)
+    },
+    onError: (error) => {
+      if (error instanceof KnowledgeRequestError && error.details?.documentId) {
+        return queryClient.invalidateQueries({
+          queryKey: ["knowledge-document", error.details.documentId],
+        })
+      }
+    },
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["knowledge-tree", knowledgeBaseId],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["knowledge-bases"] }),
+      ])
     },
   })
 }

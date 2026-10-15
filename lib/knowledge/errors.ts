@@ -14,8 +14,10 @@ export type KnowledgeErrorCode =
   | "CONTENT_REVISION_CONFLICT"
   | "KNOWLEDGE_DOCUMENT_NO_ORIGINAL"
   | "KNOWLEDGE_DOCUMENT_PROCESSING"
+  | "KNOWLEDGE_DOCUMENT_PROCESSING_FAILED"
+  | "KNOWLEDGE_CLEANUP_FAILED"
 
-type KnowledgeErrorStatus = 404 | 409
+type KnowledgeErrorStatus = 400 | 404 | 409 | 413 | 502 | 504
 
 /** 可安全返回给前端的知识库业务错误。 */
 export class KnowledgeError extends Error {
@@ -74,6 +76,7 @@ export const runKnowledgeApi = async <T>(
       error instanceof KnowledgeParseError
     ) {
       throw new HTTPException(error.status, {
+        cause: error,
         res: Response.json(
           {
             error: {

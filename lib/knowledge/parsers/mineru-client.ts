@@ -97,6 +97,14 @@ export async function parseWithMineru(
     signal.throwIfAborted()
     const status = await statusResponse.json()
     signal.throwIfAborted()
+    if (!statusResponse.ok || status.code !== 0) {
+      throw new KnowledgeParseError(
+        "PARSE_FAILED",
+        `MinerU 查询任务状态失败：${status.msg ?? `HTTP ${statusResponse.status}`}`,
+        400,
+        true
+      )
+    }
     const result = status.data?.extract_result?.[0]
 
     if (result?.state === "done") {

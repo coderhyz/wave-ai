@@ -88,6 +88,38 @@ describe("MinerU parsing with cancellation", () => {
     }
   )
 
+  it.each([
+    { httpStatus: 503, code: 0, msg: "service unavailable" },
+    { httpStatus: 200, code: -10001, msg: "invalid token" },
+  ])(
+    "fails immediately on a status-query error: HTTP $httpStatus, code $code",
+    async ({ httpStatus, code, msg }) => {
+      fetchMock
+        .mockReset()
+        .mockResolvedValueOnce(
+          Response.json({
+            code: 0,
+            data: {
+              batch_id: "batch",
+              file_urls: ["https://uploads.example/source"],
+            },
+          })
+        )
+        .mockResolvedValueOnce(new Response(null, { status: 200 }))
+        .mockResolvedValueOnce(
+          Response.json({ code, msg }, { status: httpStatus })
+        )
+      await expect(
+        parseWithMineru(Buffer.from("source"), "source.pdf")
+      ).rejects.toMatchObject({
+        code: "PARSE_FAILED",
+        status: 400,
+        message: expect.stringContaining(msg),
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    }
+  )
+
   it("does not send a request if already cancelled", async () => {
     const controller = new AbortController()
     const reason = new Error("cancelled")

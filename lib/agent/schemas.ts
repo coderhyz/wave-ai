@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { incomingUserMessageSchema, sendChatMessageSchema } from "@/lib/chat/schemas"
+import { researchModeSchema, researchOptionsSchema } from "@/lib/agent/research/schemas"
 
 /**
  * POST /api/agent/runs 的请求入口校验。
@@ -9,6 +10,8 @@ import { incomingUserMessageSchema, sendChatMessageSchema } from "@/lib/chat/sch
 export const sendAgentMessageSchema = sendChatMessageSchema
   .pick({ id: true, selectedModelId: true, trigger: true })
   .extend({
+    mode: researchModeSchema.default("web"),
+    research: researchOptionsSchema.optional(),
     message: incomingUserMessageSchema.extend({
       // 限制单段长度和片段数量；至少一段包含实际文字，拒绝全空白问题。
       parts: z.array(z.object({

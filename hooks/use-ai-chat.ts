@@ -7,11 +7,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import type { ChatModelId } from "@/lib/ai/model"
 import { fetchWithAuth } from "@/lib/hono/hono-rpc"
 
-/**
- * API 服务根地址。
- * 删除末尾斜杠，避免拼接 `/api/chat` 时出现双斜杠。
- * 未配置 NEXT_PUBLIC_APP_URL 时使用当前站点的相对地址。
- */
+/** 未配置时使用同源地址；去掉末尾斜杠，避免拼接出双斜杠。 */
 const appUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? ""
 
 interface UploadedAttachment {
@@ -82,6 +78,23 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
       throw new Error("没有可发送的用户消息")
     }
 
+    // P1 仍消费 SDK 消息流，仅深度研究显式切换到 Agent 入口。
+    if (body?.researchMode === "deep-research" && !body?.documentId) {
+      if (message.parts.some((part) => part.type !== "text")) {
+        throw new Error("深度研究目前仅支持文字提问")
+      }
+      return {
+        api: appUrl + "/api/agent/runs",
+        body: {
+          id,
+          message,
+          selectedModelId: body?.selectedModelId,
+          trigger,
+          mode: "deep-research",
+        },
+      }
+    }
+
     /**
      * selectedModelId 和 selectedToolName 来自本次 sendText/regenerate，
      * 所以用户切换模型后不需要重新创建 useChat 实例。
@@ -111,6 +124,7 @@ const chatTransport = new DefaultChatTransport<UIMessage>({
 const backgroundChats = new Map<string, Chat<UIMessage>>()
 
 export interface UseAiChatOptions {
+  researchMode?: "chat" | "deep-research"
   /** 网页搜索默认开启；发送和重新生成都读取当前值。 */
   webSearchEnabled?: boolean
   /** 当前会话 UUID。 */
@@ -125,18 +139,7 @@ export interface UseAiChatOptions {
   selectedToolName?: string | null
 }
 
-/**
- * 封装 AI SDK useChat，负责前端与 POST /api/chat 的流式交互。
- *
- * 消息和流状态由 AI SDK 管理；该 Hook 只负责组织服务端请求参数、
- * 提供文本发送与重新生成方法，并在回复完成后刷新会话缓存。
- *
- * @param chatId 当前会话 UUID。
- * @param initialMessages 服务端读取的历史消息。
- * @param selectedModelId 当前选择的模型 ID。
- * @param selectedToolName 当前选择的工具名称。
- * @returns 消息、流状态以及发送、停止、重新生成等操作方法。
- */
+/** 组织发送参数、附件上传与历史刷新；消息和流状态由 AI SDK 管理。 */
 export const useAiChat = ({
   chatId,
   initialMessages = [],
@@ -144,6 +147,7 @@ export const useAiChat = ({
   selectedToolName = null,
   documentId,
   webSearchEnabled = true,
+  researchMode = "chat",
 }: UseAiChatOptions) => {
   /** 用于在回复完成后刷新会话列表和会话详情。 */
   const queryClient = useQueryClient()
@@ -159,31 +163,24 @@ export const useAiChat = ({
       return existingChat
     }
 
-    const refreshQueries = () => {
+    const finishChat = () => {
       queryClient.invalidateQueries({ queryKey: ["chats"] })
       queryClient.invalidateQueries({ queryKey: ["chat", chatId] })
       if (documentId)
         void queryClient.invalidateQueries({
           queryKey: ["document-chat", documentId],
         })
+      if (backgroundChats.get(chatId) === instance) {
+        backgroundChats.delete(chatId)
+      }
     }
 
     const instance = new Chat<UIMessage>({
       id: chatId,
       messages: initialMessages,
       transport: chatTransport,
-      onFinish: () => {
-        refreshQueries()
-        if (backgroundChats.get(chatId) === instance) {
-          backgroundChats.delete(chatId)
-        }
-      },
-      onError: () => {
-        refreshQueries()
-        if (backgroundChats.get(chatId) === instance) {
-          backgroundChats.delete(chatId)
-        }
-      },
+      onFinish: finishChat,
+      onError: finishChat,
     })
 
     backgroundChats.set(chatId, instance)
@@ -220,13 +217,7 @@ export const useAiChat = ({
   const isGenerating =
     isUploading || chat.status === "submitted" || chat.status === "streaming"
 
-  /**
-   * 发送一条用户消息，文本和附件都会成为同一条 UIMessage 的 parts。
-   *
-   * @param text 输入框中的原始文本。
-   * @param files 浏览器中已转换为 Data URL 的临时附件；发送前会先写入 OSS。
-   * @returns 成功发起请求时返回 true；空消息或生成期间返回 false。
-   */
+  /** 附件先上传 OSS；发送失败时回收尚未被消息认领的附件。 */
   const sendText = useCallback(
     async (
       text: string,
@@ -241,6 +232,9 @@ export const useAiChat = ({
         return false
       }
 
+      if (researchMode === "deep-research" && !documentId && files.length > 0) {
+        throw new Error("深度研究目前仅支持文字提问，请移除附件")
+      }
 
       /** 新请求开始前清除上一轮错误状态。 */
       chat.clearError()
@@ -274,6 +268,10 @@ export const useAiChat = ({
               createdAt: new Date().toISOString(),
               modelId,
               webSearchEnabled,
+              mode:
+                researchMode === "deep-research" && !documentId
+                  ? "deep-research"
+                  : "chat",
             },
           },
           {
@@ -282,6 +280,7 @@ export const useAiChat = ({
               selectedToolName,
               documentId,
               webSearchEnabled,
+              researchMode,
             },
           }
         )
@@ -303,15 +302,11 @@ export const useAiChat = ({
       selectedToolName,
       documentId,
       webSearchEnabled,
+      researchMode,
     ]
   )
 
-  /**
-   * 重新生成一条助手回复。
-   *
-   * @param messageId 需要重新生成的助手消息 ID；不传时使用最后一条。
-   * @returns 成功发起请求时返回 true；生成期间返回 false。
-   */
+  /** 按指定消息重新生成回复；省略 ID 时重试最后一轮。 */
   const regenerate = useCallback(
     async (messageId?: string) => {
       /** 正在生成时不启动第二条并发流。 */
@@ -329,6 +324,7 @@ export const useAiChat = ({
           selectedToolName,
           documentId,
           webSearchEnabled,
+          researchMode,
         },
       })
 
@@ -343,6 +339,7 @@ export const useAiChat = ({
       selectedToolName,
       documentId,
       webSearchEnabled,
+      researchMode,
     ]
   )
 
@@ -365,8 +362,6 @@ export const useAiChat = ({
     isGenerating,
     /** 是否正在把本地附件写入 OSS。 */
     isUploading,
-    /** 输入框当前是否允许提交。 */
-    canSubmit: !isGenerating,
     sendText,
     regenerate,
     /** 中止当前流式请求，并保留已经收到的内容。 */

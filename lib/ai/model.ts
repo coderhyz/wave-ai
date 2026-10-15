@@ -1,7 +1,7 @@
 export const CHAT_MODEL_IDS = [
   "deepseek-v4-pro",
-  "qwen-plus",
-  "qwen3.7-flash",
+  "qwen3.8-max",
+  "qwen3.8-flash",
 ] as const
 
 export type ChatModelId = (typeof CHAT_MODEL_IDS)[number]
@@ -31,22 +31,22 @@ export const chatModels: readonly ChatModel[] = [
     reasoningTokenBudget: null,
   },
   {
-    id: "qwen-plus",
-    name: "Qwen Plus",
+    id: "qwen3.8-max",
+    name: "Qwen 3.8 Max",
     brand: "qwen",
     description: "通义千问文本模型，适合通用问答和内容生成。",
     supportsImageInput: false,
     supportsReasoning: true,
     maxOutputTokens: 4096,
-    // Qwen Plus 支持思考，但保持项目原有的关闭状态，不额外增加消耗。
+    // Qwen 3.8 Max 支持思考，但保持项目原有的关闭状态，不额外增加消耗。
     reasoningTokenBudget: 0,
   },
   {
-    id: "qwen3.7-flash",
-    name: "Qwen 3.7 Flash",
+    id: "qwen3.8-flash",
+    name: "Qwen 3.8 Flash",
     brand: "qwen",
     description:
-      "通义千问 3.7 系列的高速模型，兼顾响应速度、成本与多模态理解能力。",
+      "通义千问 3.8 系列的高速模型，兼顾响应速度、成本与多模态理解能力。",
     supportsImageInput: true,
     supportsReasoning: true,
     maxOutputTokens: 4096,
@@ -55,7 +55,7 @@ export const chatModels: readonly ChatModel[] = [
 ]
 
 /** 当前项目用于处理图片输入的默认视觉模型。 */
-export const DEFAULT_VISION_MODEL_ID: ChatModelId = "qwen3.7-flash"
+export const DEFAULT_VISION_MODEL_ID: ChatModelId = "qwen3.8-flash"
 
 /** 图片消息误选纯文本模型时，自动回退到视觉模型。 */
 export const resolveChatModelId = (

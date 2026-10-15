@@ -5,21 +5,23 @@ import { HTTPException } from "hono/http-exception"
 import {
   consumeStream, convertToModelMessages, createUIMessageStream,
   createUIMessageStreamResponse, toUIMessageStream, validateUIMessages,
-  type UIMessageChunk, type UIMessage,
+  type UIMessageChunk, type UIMessage, type ToolSet,
 } from "ai"
 import { getAuthUser } from "@/lib/hono/hono-middware"
 import { createWebResearchAgent } from "@/lib/agent/agent"
+import { runResearchWorkflow, ResearchWorkflowError } from "@/lib/agent/research/workflow"
 import { sendAgentMessageSchema } from "@/lib/agent/schemas"
 import {
   ChatOwnershipError, MessageConflictError, getOrCreateOwnedChat,
   readChatTurn, saveMessageOnce,
 } from "@/lib/chat/persistence"
 import { deleteOssObjectsBestEffort } from "@/lib/chat-attachment-storage"
-import { toUIMessage } from "@/lib/chat/mapper"
+import { getMessageText, toUIMessage } from "@/lib/chat/mapper"
+import { getKnowledgeCitations } from "@/lib/chat/citations"
 import prisma from "@/lib/prisma"
 
 /**
- * 阶段一接口：认证 → 保存问题 → 搜索与总结 → 流式返回 → 保存完整助手消息。
+ * 单请求入口：认证 → 保存问题 → 单轮联网或 P3 研究工作流 → 保存完整助手消息。
  * 消息继续写入 Chat / Message；这里尚未建立后台任务或 AgentRun 状态管理。
  */
 export const agentRoute =
@@ -32,7 +34,7 @@ export const agentRoute =
         try {
           // 1. 身份来自登录 Session，客户端不能指定执行任务的用户。
           const userId = c.get("user").id
-          const { id, message: rawMessage, selectedModelId, trigger } = c.req.valid("json")
+          const { id, message: rawMessage, selectedModelId, trigger, mode, research: researchOptions } = c.req.valid("json")
           // 验证消息格式
           // Zod 校验请求外形，AI SDK 校验消息 parts 的协议语义。
           const [message] = await validateUIMessages<UIMessage>({
@@ -40,7 +42,7 @@ export const agentRoute =
           })
           // 服务端记录实际入口，刷新及重新生成时可恢复联网模式。
           message.metadata = {
-            createdAt: new Date().toISOString(), modelId: selectedModelId, mode: "web",
+            createdAt: new Date().toISOString(), modelId: selectedModelId, mode,
           }
           // 省略 documentId 会拒绝已有文档问答会话，保持固定文档范围。
           await getOrCreateOwnedChat({
@@ -67,10 +69,12 @@ export const agentRoute =
           await deleteOssObjectsBestEffort(turn.attachmentKeys)
           // 历史消息供 SDK 组织本次响应；下面实际送给研究模型的只有当前文字问题。
           const originalMessages = turn.messages.map(toUIMessage)
-          const { agent, sources } = createWebResearchAgent(selectedModelId)
+          const research = mode === "web" ? createWebResearchAgent(selectedModelId) : undefined
+          const sources = research?.sources ?? []
+          let workflow: Awaited<ReturnType<typeof runResearchWorkflow>> | undefined
           // 单次联网只处理当前文字问题，不把历史附件或私有检索结果送入搜索链。
           // agent执行
-          const result = await agent.stream({
+          const result = await research?.agent.stream({
             messages: await convertToModelMessages([message]),
             abortSignal: c.req.raw.signal,
           })
@@ -82,11 +86,55 @@ export const agentRoute =
           const stream = createUIMessageStream({
             originalMessages,
             generateId: () => crypto.randomUUID(),
-            execute: ({ writer }) => {
+            execute: async ({ writer }) => {
+              if (mode === "deep-research") {
+                writer.write({ type: "start", messageMetadata: { createdAt, modelId: selectedModelId, mode } })
+                try {
+                  workflow = await runResearchWorkflow({
+                    modelId: selectedModelId, userId, question: getMessageText(message), options: researchOptions,
+                    signal: c.req.raw.signal,
+                    onPlan: (plan) => writer.write({ type: "data-research-plan", data: plan }),
+                    onEvaluation: (evaluation) => writer.write({ type: "data-research-evaluation", data: evaluation }),
+                    onResearchStream: (stream) => stream.pipeTo(new WritableStream({ write: (chunk) => writer.write(chunk) })),
+                  })
+                  for (const source of workflow.sources) {
+                    if (source.url) writer.write({ type: "source-url", sourceId: source.id, url: source.url, title: source.title })
+                  }
+                  writer.write({
+                    type: "data-research-report", data: {
+                      sources: workflow.sources, evidence: workflow.evidence, verification: workflow.verification,
+                      rejectedDraft: workflow.rejectedDraft ?? null, reportStatus: workflow.reportStatus, stopReason: workflow.stopReason, budget: workflow.budget,
+                    }
+                  })
+                  writer.write({ type: "text-start", id: "research-report" })
+                  writer.write({ type: "text-delta", id: "research-report", delta: workflow.report })
+                  writer.write({ type: "text-end", id: "research-report" })
+                  writer.write({
+                    type: "finish", finishReason: "stop", messageMetadata: {
+                      createdAt, modelId: selectedModelId, mode,
+                      evidenceStatus: workflow.evidence.length ? "collected" : "insufficient",
+                      researchStatus: workflow.stopReason === "complete" && workflow.reportStatus === "generated" ? "complete" : "incomplete",
+                    }
+                  })
+                } catch (error) {
+                  if (c.req.raw.signal.aborted) {
+                    writer.write({ type: "abort" })
+                    return
+                  }
+                  if (error instanceof ResearchWorkflowError) writer.write({
+                    type: "data-research-error", data: {
+                      success: false, phase: error.phase, errorCode: error.errorCode, error: error.message,
+                    }
+                  })
+                  throw error
+                }
+                return
+              }
+              if (!result) throw new Error("缺少联网 Agent")
               // 内层转换模型文本和工具事件；来源由真实搜索结果显式补入。
-              writer.merge(toUIMessageStream({
-                stream: result.stream, sendReasoning: false, sendSources: false,
-                messageMetadata: () => ({ createdAt, modelId: selectedModelId, mode: "web" }),
+              writer.merge(toUIMessageStream<ToolSet>({
+                stream: result.stream, sendReasoning: true, sendSources: false,
+                messageMetadata: () => ({ createdAt, modelId: selectedModelId, mode }),
               }).pipeThrough(new TransformStream<UIMessageChunk, UIMessageChunk>({
                 transform(chunk, controller) {
                   controller.enqueue(chunk)
@@ -100,23 +148,31 @@ export const agentRoute =
             },
             // 4. 流结束后保存完整 parts，刷新时可重建文本、工具状态和来源。
             onEnd: async ({ responseMessage, isAborted, finishReason }) => {
-              // totalUsage 汇总两个模型步骤；停止时用量可能拿不到，仍保存已有部分消息。
-              const [usage] = await Promise.allSettled([result.totalUsage])
+              // totalUsage 汇总全部模型步骤；停止时用量可能拿不到，仍保存已有部分消息。
+              const [usage] = await Promise.allSettled([mode === "deep-research" ? workflow?.usage : result?.totalUsage])
               if (!isAborted && usage.status === "rejected") throw usage.reason
               await saveMessageOnce({
                 chatId: id,
                 message: responseMessage,
                 modelId: selectedModelId,
-                metadata: { createdAt, modelId: selectedModelId, mode: "web", isAborted },
+                metadata: {
+                  createdAt, modelId: selectedModelId, mode, isAborted,
+                  ...(mode === "deep-research" ? {
+                    evidenceStatus: workflow?.evidence.length ? "collected" : "insufficient",
+                    researchStatus: workflow ? (workflow.stopReason === "complete" && workflow.reportStatus === "generated" ? "complete" : "incomplete") : (isAborted ? "cancelled" : "failed"),
+                    citationChunkIds: getKnowledgeCitations(responseMessage).map((citation) => citation.chunkId),
+                  } : {}),
+                },
                 finishReason: finishReason ?? "other",
-                promptTokens: usage.status === "fulfilled" ? usage.value.inputTokens : null,
-                completionTokens: usage.status === "fulfilled" ? usage.value.outputTokens : null,
+                promptTokens: usage.status === "fulfilled" ? usage.value?.inputTokens : null,
+                completionTokens: usage.status === "fulfilled" ? usage.value?.outputTokens : null,
               })
               // 历史会话记录本次实际模型，重新打开时用于初始化模型选择。
               await prisma.chat.updateMany({ where: { id, userId }, data: { modelId: selectedModelId } })
             },
             onError: (error) => {
               console.error("Web research stream failed", error)
+              if (error instanceof ResearchWorkflowError) return error.message
               return "联网回复生成或保存失败，请稍后重试。"
             },
           })

@@ -11,7 +11,6 @@ import {
   PromptInputActionAddAttachments,
   PromptInputActionMenu,
   PromptInputActionMenuContent,
-  PromptInputActionMenuItem,
   PromptInputActionMenuTrigger,
   PromptInputBody,
   PromptInputFooter,
@@ -55,6 +54,8 @@ const MAX_ATTACHMENT_SIZE = 2 * 1024 * 1024
 const MAX_ATTACHMENTS = 3
 
 interface ChatComposerProps {
+  researchMode?: "chat" | "deep-research"
+  onResearchModeChange?: (mode: "chat" | "deep-research") => void
   /** 网页搜索默认开启，工具菜单中的开关只控制搜索能力。 */
   webSearchEnabled?: boolean
   onWebSearchEnabledChange?: (enabled: boolean) => void
@@ -152,6 +153,8 @@ export function ChatComposer({
   placeholder = "问点什么，一起探索",
   webSearchEnabled = true,
   onWebSearchEnabledChange,
+  researchMode = "chat",
+  onResearchModeChange,
 }: ChatComposerProps) {
   const isHero = variant === "hero"
   const isGenerating = status === "submitted" || status === "streaming"
@@ -161,13 +164,17 @@ export function ChatComposer({
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
+      if (researchMode === "deep-research" && message.files.length > 0) {
+        toast.error("深度研究目前仅支持文字提问，请移除附件")
+        return
+      }
       const didSend = await onSubmit(message)
 
       if (didSend) {
         onValueChange("")
       }
     },
-    [onSubmit, onValueChange]
+    [onSubmit, onValueChange, researchMode]
   )
 
   const handleAttachmentError = useCallback(
@@ -213,7 +220,7 @@ export function ChatComposer({
           )}
           disabled={isGenerating}
           onChange={(event) => onValueChange(event.currentTarget.value)}
-          placeholder={placeholder}
+          placeholder={researchMode === "deep-research" ? "输入研究问题，多轮检索公开资料和知识库" : placeholder}
           value={value}
         />
       </PromptInputBody>
@@ -236,21 +243,25 @@ export function ChatComposer({
               >
                 <PromptInputActionAddAttachments
                   className="h-11 rounded-xl text-base"
-                  disabled={isGenerating}
+                  disabled={isGenerating || researchMode === "deep-research"}
                   label="添加照片和文件"
                 />
-                <PromptInputActionMenuItem
-                  className="h-11 rounded-xl text-base"
-                  disabled
-                >
-                  <Microscope className="mr-2 size-5" />
-                  深度研究
-                </PromptInputActionMenuItem>
+                {onResearchModeChange && (
+                  <DropdownMenuCheckboxItem
+                    className="h-11 rounded-xl text-base"
+                    checked={researchMode === "deep-research"}
+                    disabled={isGenerating}
+                    onCheckedChange={(checked) => onResearchModeChange(checked ? "deep-research" : "chat")}
+                  >
+                    <Microscope className="mr-2 size-5" />
+                    深度研究
+                  </DropdownMenuCheckboxItem>
+                )}
                 {onWebSearchEnabledChange && (
                   <DropdownMenuCheckboxItem
                     className="h-11 rounded-xl text-base"
                     checked={webSearchEnabled}
-                    disabled={isGenerating}
+                    disabled={isGenerating || researchMode === "deep-research"}
                     onCheckedChange={onWebSearchEnabledChange}
                   >
                     <Globe2 className="mr-2 size-5" />

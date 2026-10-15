@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useLayoutEffect, useState } from "react"
+import { useCallback, useState } from "react"
 import type { UIMessage } from "ai"
 import {
   LoaderCircle,
@@ -11,6 +11,7 @@ import {
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input"
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion"
 import { ChatComposer } from "@/components/chat/chat-composer"
+import { SourcePanel } from "@/components/chat/source-panel"
 import { MessageList } from "@/components/chat/message-list"
 import { getMessageWebSearchEnabled } from "@/lib/chat/mapper"
 import { useAiChat } from "@/hooks/use-ai-chat"
@@ -42,7 +43,8 @@ const presetPrompts = [
   },
   {
     label: "搜索今日新闻",
-    prompt: "请联网搜索今日国内外重要新闻，简要总结，并注明发布时间和来源链接。",
+    prompt:
+      "请联网搜索今日国内外重要新闻，简要总结，并注明发布时间和来源链接。",
     icon: Newspaper,
   },
 ] as const
@@ -108,12 +110,27 @@ function ChatSession({
   )
   // 搜索默认可用，菜单开关与模型选择相互独立，并从最后一次发送恢复。
   const [webSearchEnabled, setWebSearchEnabled] = useState(() =>
-    getMessageWebSearchEnabled(initialMessages.findLast((message) => message.role === "user"))
+    getMessageWebSearchEnabled(
+      initialMessages.findLast((message) => message.role === "user")
+    )
   )
+  const [researchMode, setResearchMode] = useState<"chat" | "deep-research">(
+    () => {
+      const metadata = initialMessages.findLast(
+        (message) => message.role === "user"
+      )?.metadata
+      return !documentId &&
+        metadata &&
+        typeof metadata === "object" &&
+        "mode" in metadata &&
+        metadata.mode === "deep-research"
+        ? "deep-research"
+        : "chat"
+    }
+  )
+  const [sourceMessageId, setSourceMessageId] = useState<string | null>(null)
   const setDraft = useChatUiStore((state) => state.setDraft)
   const setSelectedModel = useChatUiStore((state) => state.setSelectedModel)
-
-
 
   /** 将输入框变化写入当前 chatId 对应的草稿。 */
   const handleInputChange = useCallback(
@@ -135,7 +152,14 @@ function ChatSession({
     regenerate,
     stop,
     clearError,
-  } = useAiChat({ chatId, initialMessages, selectedModelId, documentId, webSearchEnabled: !documentId && webSearchEnabled })
+  } = useAiChat({
+    chatId,
+    initialMessages,
+    selectedModelId,
+    documentId,
+    webSearchEnabled: !documentId && webSearchEnabled,
+    researchMode,
+  })
   // 发送文本和附件，清除错误状态
   const handleSubmit = useCallback(
     async ({ text, files }: PromptInputMessage) => {
@@ -152,7 +176,7 @@ function ChatSession({
 
       if (effectiveModelId !== selectedModelId) {
         setSelectedModel(chatId, effectiveModelId)
-        toast.info("图片消息已自动切换到 Qwen 3.7 Flash 视觉模型")
+        toast.info("图片消息已自动切换到 Qwen 3.8 Flash 视觉模型")
       }
 
       try {
@@ -172,36 +196,37 @@ function ChatSession({
   const handleRetry = useCallback(() => {
     regenerate()
   }, [regenerate])
-  // 重新生成
-  const handleRegenerate = useCallback(
-    (messageId: string) => {
-      regenerate(messageId)
-    },
-    [regenerate]
-  )
 
   /** 空会话展示欢迎页，已有消息时展示消息列表和底部输入框。 */
   const isEmpty = messages.length === 0
+  const sourceMessage = messages.find(
+    (message) => message.id === sourceMessageId
+  )
+  const composer = (
+    <ChatComposer
+      researchMode={researchMode}
+      onResearchModeChange={documentId ? undefined : setResearchMode}
+      webSearchEnabled={webSearchEnabled}
+      onWebSearchEnabledChange={documentId ? undefined : setWebSearchEnabled}
+      onModelChange={handleModelChange}
+      onStop={stop}
+      onSubmit={handleSubmit}
+      onValueChange={handleInputChange}
+      selectedModelId={selectedModelId}
+      status={isUploading ? "submitted" : status}
+      value={input}
+      variant={isEmpty ? "hero" : "docked"}
+    />
+  )
 
   return (
-    <main className="relative flex h-dvh min-h-0 flex-col overflow-hidden bg-gradient-to-b from-primary/10 via-background to-background pt-10">
+    <main className="relative flex h-dvh min-h-0 overflow-hidden bg-gradient-to-b from-primary/10 via-background to-background pt-10">
       <div className="pointer-events-none absolute inset-x-0 top-10 h-64 bg-[radial-gradient(circle_at_top,var(--primary),transparent_68%)] opacity-[0.07]" />
 
       {isEmpty ? (
-        <section className="relative flex flex-1 flex-col items-center px-4 pt-[clamp(3rem,12vh,8rem)] md:px-8">
+        <section className="relative flex min-w-0 flex-1 flex-col items-center px-4 pt-[clamp(3rem,12vh,8rem)] md:px-8">
           <div className="w-full max-w-5xl">
-            <ChatComposer
-              webSearchEnabled={webSearchEnabled}
-              onWebSearchEnabledChange={documentId ? undefined : setWebSearchEnabled}
-              onModelChange={handleModelChange}
-              onStop={stop}
-              onSubmit={handleSubmit}
-              onValueChange={handleInputChange}
-              selectedModelId={selectedModelId}
-              status={isUploading ? "submitted" : status}
-              value={input}
-              variant="hero"
-            />
+            {composer}
             {/* 预制提示词部分 */}
             <Suggestions className="mx-auto mt-8 justify-center px-2 pb-2">
               {presetPrompts.map(({ label, prompt, icon: Icon }) => (
@@ -219,29 +244,20 @@ function ChatSession({
           </div>
         </section>
       ) : (
-        <section className="relative flex min-h-0 flex-1 flex-col">
+        <section className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <MessageList
             chatId={chatId}
             error={error}
             messages={messages}
-            onRegenerate={handleRegenerate}
+            onRegenerate={regenerate}
+            onShowSources={documentId ? undefined : setSourceMessageId}
             onRetry={handleRetry}
             status={status}
           />
 
           <div className="border-t border-border/60 bg-background/80 px-4 py-3 backdrop-blur-xl md:px-8 md:py-4">
             <div className="mx-auto w-full max-w-4xl">
-              <ChatComposer
-              webSearchEnabled={webSearchEnabled}
-              onWebSearchEnabledChange={documentId ? undefined : setWebSearchEnabled}
-                onModelChange={handleModelChange}
-                onStop={stop}
-                onSubmit={handleSubmit}
-                onValueChange={handleInputChange}
-                selectedModelId={selectedModelId}
-                status={isUploading ? "submitted" : status}
-                value={input}
-              />
+              {composer}
               <p className="mt-2 text-center text-xs text-muted-foreground">
                 AI 生成的内容可能存在错误，请核对重要信息。
               </p>
@@ -249,6 +265,10 @@ function ChatSession({
           </div>
         </section>
       )}
+      <SourcePanel
+        message={sourceMessage}
+        onClose={() => setSourceMessageId(null)}
+      />
     </main>
   )
 }

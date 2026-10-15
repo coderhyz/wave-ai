@@ -1,9 +1,9 @@
 "use client"
 
-import { memo, useCallback, useLayoutEffect, useRef } from "react"
+import { memo, useCallback, useLayoutEffect, useRef, useState } from "react"
 import { isToolUIPart, getToolName, type ChatStatus, type UIMessage } from "ai"
 import { useVirtualizer } from "@tanstack/react-virtual"
-import { Copy, Download, LoaderCircle, RefreshCcw } from "lucide-react"
+import { BookPlus, Copy, Download, LoaderCircle, PanelRightOpen, RefreshCcw } from "lucide-react"
 import { toast } from "sonner"
 import { useStickToBottom } from "use-stick-to-bottom"
 import {
@@ -12,6 +12,10 @@ import {
   ConversationScrollButton,
 } from "@/components/ai-elements/conversation"
 import { Attachments } from "@/components/ai-elements/attachments"
+import { SearchActivity } from "@/components/chat/search-activity"
+import { ChatMessageResponse } from "@/components/chat/chat-message-response"
+import { SaveMessageToKnowledgeDialog } from "@/components/chat/save-message-to-knowledge-dialog"
+import { getChatSources } from "@/lib/chat/sources"
 import { KnowledgeCitations } from "@/components/chat/knowledge-citations"
 import {
   formatKnowledgeCitationText,
@@ -24,7 +28,6 @@ import {
   MessageAction,
   MessageActions,
   MessageContent,
-  MessageResponse,
 } from "@/components/ai-elements/message"
 import {
   Reasoning,
@@ -110,6 +113,7 @@ interface ChatMessageProps {
   isLastMessage: boolean
   isStreaming: boolean
   onRegenerate: (messageId: string) => void
+  onShowSources?: (messageId: string) => void
 }
 
 /**
@@ -126,7 +130,9 @@ const ChatMessage = memo(function ChatMessage({
   isLastMessage,
   isStreaming,
   onRegenerate,
+  onShowSources,
 }: ChatMessageProps) {
+  const [savingToKnowledge, setSavingToKnowledge] = useState(false)
   /**
    * AI SDK 把一条消息表示成多个 part。先按类型拆开，后续区域就只处理
    * 自己关心的数据，也能借助 TypeScript 类型守卫获得准确的字段类型。
@@ -153,6 +159,8 @@ const ChatMessage = memo(function ChatMessage({
     .filter((part) => /^https?:\/\//.test(part.url))
     .map((part) => [part.url, part])).values())
   const citations = getKnowledgeCitations(message)
+  const sourceCount = getChatSources(message).length
+  const hasSearchActivity = message.parts.some((part) => isToolUIPart(part) && ["webSearch", "searchKnowledge"].includes(getToolName(part)))
   const bodyText = textParts
     .map((part) =>
       message.role === "assistant"
@@ -243,7 +251,13 @@ const ChatMessage = memo(function ChatMessage({
           </Attachments>
         )}
 
-        {/* 按 SDK parts 的真实顺序渲染，保留“思考 → 搜索 → 后续思考/回答”的每一轮过程。 */}
+        {/* 检索过程集中折叠，正文继续按 SDK parts 顺序渲染。 */}
+        <SearchActivity
+          message={message}
+          isStreaming={isLastMessage && isStreaming}
+          sourceCount={sourceCount}
+          onShowSources={onShowSources ? () => onShowSources(message.id) : undefined}
+        />
         {message.parts.map((part, index) => {
           const key = message.id + "-part-" + index
           const isCurrentStep = index > currentStepStart
@@ -269,36 +283,11 @@ const ChatMessage = memo(function ChatMessage({
             )
           }
 
-          if (isToolUIPart(part) && getToolName(part) === "webSearch") {
-            const output = part.state === "output-available" ? part.output : undefined
-            // SDK 执行异常和工具返回 success:false 都是失败，不把它们显示成搜索完成。
-            const failed = part.state === "output-error" ||
-              (output !== null && typeof output === "object" && "success" in output && output.success === false)
-            const errorText = part.state === "output-error" ? part.errorText :
-              output !== null && typeof output === "object" && "error" in output && typeof output.error === "string" ? output.error : undefined
-            const query = part.input !== null && typeof part.input === "object" && "query" in part.input && typeof part.input.query === "string" ? part.input.query : ""
-            const empty = output !== null && typeof output === "object" && "results" in output && Array.isArray(output.results) && output.results.length === 0
-            // 判断本次调用，而不是只看整条消息是否还在生成；历史未完成调用如实显示未完成。
-            const isActive = isLastMessage && isStreaming && isCurrentStep
-            const label = failed ? "搜索失败"
-              : part.state === "output-available" ? (empty ? "未找到搜索结果" : "搜索完成")
-              : part.state === "output-denied" ? "搜索已取消"
-              : isActive && part.state === "input-streaming" ? "准备搜索"
-              : isActive && part.state === "input-available" ? "正在搜索"
-              : "搜索未完成"
-            return (
-              <div key={part.toolCallId} role="status" className="mb-3 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-sm">
-                {label}{query && <span className="ml-2 text-muted-foreground">{query}</span>}
-                {failed && errorText && <p className="mt-1 text-destructive">{errorText}</p>}
-              </div>
-            )
-          }
-
           if (part.type === "text") {
             return message.role === "assistant" ? (
-              <MessageResponse key={key}>
+              <ChatMessageResponse key={key}>
                 {formatKnowledgeCitationText(part.text, citations)}
-              </MessageResponse>
+              </ChatMessageResponse>
             ) : (
               <p className="leading-7 break-words whitespace-pre-wrap" key={key}>
                 {part.text}
@@ -307,9 +296,14 @@ const ChatMessage = memo(function ChatMessage({
           }
           return null
         })}
-        <KnowledgeCitations message={message} />
+        {!onShowSources && <KnowledgeCitations message={message} />}
+        {onShowSources && sourceCount > 0 && !hasSearchActivity && (
+          <Button variant="ghost" size="sm" className="mt-2 w-fit" onClick={() => onShowSources(message.id)}>
+            <PanelRightOpen className="size-4" />来源 {sourceCount}
+          </Button>
+        )}
         {/* 阶段一取得的是搜索摘要，来源链接供用户继续阅读原文。 */}
-        {sources.length > 0 && (
+        {!onShowSources && sources.length > 0 && (
           <section aria-label="网页来源" className="mt-4 border-t border-border/50 pt-3">
             <p className="mb-2 text-xs text-muted-foreground">参考来源 · 搜索摘要</p>
             <div className="flex flex-wrap gap-2">
@@ -338,6 +332,15 @@ const ChatMessage = memo(function ChatMessage({
         >
           <Download className="size-4" />
         </MessageAction>
+        {message.role === "assistant" && (
+          <MessageAction
+            disabled={!bodyText.trim() || (isLastMessage && isGenerating)}
+            onClick={() => setSavingToKnowledge(true)}
+            tooltip="保存到知识库"
+          >
+            <BookPlus className="size-4" />
+          </MessageAction>
+        )}
         {/* 重新生成以用户消息为锚点，因此只显示在用户消息操作栏。 */}
         {message.role === "user" && (
           <MessageAction
@@ -361,6 +364,12 @@ const ChatMessage = memo(function ChatMessage({
           {modelName} · {formatMessageTime(metadata.createdAt)}
         </span>
       </p>
+      {savingToKnowledge && (
+        <SaveMessageToKnowledgeDialog
+          content={text}
+          onClose={() => setSavingToKnowledge(false)}
+        />
+      )}
     </Message>
   )
 })
@@ -372,6 +381,7 @@ interface MessageListProps {
   error?: Error
   onRetry: () => void
   onRegenerate: (messageId: string) => void
+  onShowSources?: (messageId: string) => void
 }
 
 /**
@@ -385,6 +395,7 @@ export function MessageList({
   error,
   onRetry,
   onRegenerate,
+  onShowSources,
 }: MessageListProps) {
   /**
    * useStickToBottom 管理“用户位于底部时跟随新 token、用户上滑后暂停跟随”。
@@ -499,6 +510,7 @@ export function MessageList({
         key={message.id}
         message={message}
         onRegenerate={onRegenerate}
+        onShowSources={onShowSources}
       />
     )
   }

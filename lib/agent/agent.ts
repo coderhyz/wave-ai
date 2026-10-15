@@ -69,7 +69,6 @@ export function createWebResearchAgent(modelId: ChatModelId) {
               deepseek: {
                 thinking: {
                   type: "disabled"
-
                 }
               }
             }

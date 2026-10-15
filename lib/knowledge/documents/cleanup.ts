@@ -34,10 +34,10 @@ export async function cleanupKnowledgeResources(documentIds?: string[]) {
       status: { in: ["PENDING", "FAILED", "CANCELLED", "RUNNING"] },
       ...(documentIds
         ? {
-            OR: documentIds.map((documentId) => ({
-              payload: { path: ["documentId"], equals: documentId },
-            })),
-          }
+          OR: documentIds.map((documentId) => ({
+            payload: { path: ["documentId"], equals: documentId },
+          })),
+        }
         : {}),
     },
     orderBy: { createdAt: "asc" },

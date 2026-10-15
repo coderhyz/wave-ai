@@ -15,7 +15,7 @@ function Navbar() {
           "rounded-full border bg-white/70 px-4 py-2 shadow-sm backdrop-blur-md",
           "dark:bg-black/30"
         )}
-        aria-label="Primary"
+        aria-label="主导航"
       >
         <Logo url="/" />
 
@@ -26,13 +26,13 @@ function Navbar() {
           >
             登录
           </Link>
-          <Link href="/auth/sign-up" aria-label="Try WaveAI for free">
+          <Link href="/auth/sign-up" aria-label="注册 Wave AI 账号">
             <HoverBorderGradient
               containerClassName="rounded-full"
               as="button"
               className="flex cursor-pointer items-center justify-center gap-2 px-4 py-2"
             >
-              <span>免费 使用WaveAI</span>
+              <span>注册体验</span>
               <ArrowRight className="h-4 w-4" />
             </HoverBorderGradient>
           </Link>

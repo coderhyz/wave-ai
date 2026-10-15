@@ -115,6 +115,7 @@ QWEN_API_KEY="your_qwen_api_key"
 ELASTICSEARCH_URL="https://your_elasticsearch_host:9200"
 ELASTICSEARCH_USERNAME="your_elasticsearch_username"
 ELASTICSEARCH_PASSWORD="your_elasticsearch_password"
+ELASTICSEARCH_REQUEST_TIMEOUT_MS=300000
 
 # 阿里云 OSS
 OSS_REGION="oss-cn-hangzhou"
@@ -136,6 +137,8 @@ TAVILY_API_KEY="your_tavily_api_key"
 # 示例先关闭可选重排，使用 RRF 排序
 RAG_RERANK_ENABLED=false
 ```
+
+ES 客户端请求超时由 `ELASTICSEARCH_REQUEST_TIMEOUT_MS` 配置，单位为毫秒，默认 `10000`（10 秒），示例设置为 `30000`（30 秒）。本地修改 `.env` 后重启；Vercel 在项目的 Environment Variables 中设置到实际部署环境后重新部署。该配置不改变文档整体处理预算或平台函数时限。
 
 重排在代码中默认开启。需要启用时，设置 `RAG_RERANK_ENABLED=true`，并补充与百炼业务空间匹配的 HTTPS 接口地址 `RAG_RERANK_URL`；可通过 `RAG_RERANK_MODEL` 和 `RAG_RERANK_MIN_SCORE` 调整模型及阈值。重排失败时返回警告并保留 RRF 排序。
 

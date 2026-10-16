@@ -60,7 +60,7 @@ const revisionConflict = () =>
 /** 仅竞争不提交数据的外部等待；数据库事务须结束后再判断是否补偿清理。 */
 async function waitForAbort<T>(signal: AbortSignal, execute: () => Promise<T>) {
   signal.throwIfAborted()
-  let onAbort = () => {}
+  let onAbort = () => { }
   try {
     const aborted = new Promise<never>((_resolve, reject) => {
       onAbort = () => reject(signal.reason)
@@ -122,9 +122,9 @@ export async function parseKnowledgeDocument(
         dedupeKey: `cleanup:${input.documentId}:${assetName}`,
         availableAt: new Date(
           Date.now() +
-            (uncertainAssetNames.has(assetName)
-              ? DOCUMENT_PROCESSING_TIMEOUT_MS
-              : 0)
+          (uncertainAssetNames.has(assetName)
+            ? DOCUMENT_PROCESSING_TIMEOUT_MS
+            : 0)
         ),
         payload: {
           storageKey: getKnowledgeAssetStorageKey(input.documentId, assetName),
@@ -237,7 +237,7 @@ export async function parseKnowledgeDocument(
         if (
           source.byteLength !== document.sizeBytes ||
           createHash("sha256").update(source).digest("hex") !==
-            document.checksumSha256
+          document.checksumSha256
         )
           throw new KnowledgeParseError(
             "FILE_SIGNATURE_MISMATCH",
@@ -365,7 +365,11 @@ export async function parseKnowledgeDocument(
           parseErrorCode:
             error instanceof KnowledgeParseError ? error.code : "PARSE_FAILED",
           parseErrorMessage:
-            error instanceof Error ? error.message : "文档解析失败",
+            error instanceof Error && error.message
+              ? error.message
+              : input.signal?.aborted
+                ? "解析请求已中断，请重新解析文档"
+                : "文档解析失败，未返回具体错误原因",
         },
       })
     }
@@ -378,6 +382,7 @@ export async function indexKnowledgeDocument(
   input: ProcessingInput & { contentRevision: number }
 ) {
   let started = false
+  let stage = "准备索引"
   let failureWhere: Prisma.KnowledgeDocumentWhereInput | undefined
   try {
     return await withDeadline(
@@ -429,6 +434,7 @@ export async function indexKnowledgeDocument(
             },
             data: { chunkStatus: "RUNNING", chunkErrorMessage: null },
           })
+          // 记录了 chunkStatus 的变更，避免重复索引。
           if (updated.count !== 1) throw revisionConflict()
           signal.throwIfAborted()
         }, transactionOptions)
@@ -438,13 +444,15 @@ export async function indexKnowledgeDocument(
         const metadata = document.parseMetadata
         const sections =
           metadata &&
-          typeof metadata === "object" &&
-          !Array.isArray(metadata) &&
-          Array.isArray(metadata.sections)
+            typeof metadata === "object" &&
+            !Array.isArray(metadata) &&
+            Array.isArray(metadata.sections)
             ? (metadata.sections as unknown as ParsedSection[])
             : undefined
+        stage = "分块"
         const chunks = await chunkMarkdown(document.markdownContent, sections)
         signal.throwIfAborted()
+        stage = "向量化"
         const { embeddings, embeddingModel } = await waitForAbort(signal, () =>
           embedDocumentChunks({
             documentTitle: document.title,
@@ -454,6 +462,7 @@ export async function indexKnowledgeDocument(
         )
         signal.throwIfAborted()
         // 不能让中止竞争提前结束写入等待，否则删除可能先清理、后被晚到写入覆盖。
+        stage = "Elasticsearch 写入"
         await indexKnowledgeChunks({
           userId: input.userId,
           knowledgeBaseId: document.knowledgeBaseId,
@@ -464,6 +473,7 @@ export async function indexKnowledgeDocument(
           abortSignal: signal,
         })
         signal.throwIfAborted()
+        stage = "数据库提交"
         await prisma.$transaction(async (db) => {
           await lockOwnedKnowledgeBase(
             db,
@@ -500,13 +510,35 @@ export async function indexKnowledgeDocument(
       new DOMException("文档索引超时", "TimeoutError")
     )
   } catch (error) {
+    if (!(error instanceof KnowledgeError)) {
+      // 仅记录定位所需字段，避免把 SDK 异常中的凭证、请求正文写进日志。
+      console.error("Knowledge document indexing failed", {
+        documentId: input.documentId,
+        stage,
+        errorName: error instanceof Error ? error.name : typeof error,
+        causeName:
+          error instanceof Error && error.cause instanceof Error
+            ? error.cause.name
+            : undefined,
+        statusCode:
+          error instanceof Error &&
+            "statusCode" in error &&
+            typeof error.statusCode === "number"
+            ? error.statusCode
+            : undefined,
+      })
+    }
     if (started && failureWhere) {
       await prisma.knowledgeDocument.updateMany({
         where: { ...failureWhere, chunkStatus: "RUNNING" },
         data: {
           chunkStatus: "FAILED",
           chunkErrorMessage:
-            error instanceof Error ? error.message : "文档索引失败",
+            error instanceof Error && error.message
+              ? error.message
+              : input.signal?.aborted
+                ? "索引请求已中断，请重新建立索引"
+                : `文档索引失败：${stage}（${error instanceof Error ? error.name : "未知错误"}），未返回具体错误原因`,
         },
       })
     }

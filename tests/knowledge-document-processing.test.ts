@@ -140,6 +140,7 @@ const assetParser: KnowledgeDocumentParser = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.spyOn(console, "error").mockImplementation(() => {})
   mocks.runCleanup
     .mockReset()
     .mockResolvedValue({ completed: 0, failed: 0, pending: 0 })
@@ -308,6 +309,73 @@ describe("direct document processing", () => {
     expect(document.chunkStatus).toBe("READY")
   })
 
+  it.each(["parse", "index"])(
+    "records a readable %s failure when the request aborts without a message",
+    async (stage) => {
+      const controller = new AbortController()
+      const reason = Object.assign(new Error(), { name: "ResponseAborted" })
+      const blocked = Promise.withResolvers<never>()
+      if (stage === "parse") {
+        mocks.parser.mockReturnValue({
+          ...assetParser,
+          parse: () => blocked.promise,
+        })
+      } else {
+        mocks.embed.mockReturnValue(blocked.promise)
+      }
+      const pending = processKnowledgeDocument({
+        ...input,
+        signal: controller.signal,
+      })
+      const rejected = expect(pending).rejects.toBe(reason)
+      await vi.waitFor(() =>
+        expect(
+          stage === "parse" ? mocks.parser : mocks.embed
+        ).toHaveBeenCalled()
+      )
+      controller.abort(reason)
+      await rejected
+      if (stage === "parse") {
+        expect(document.status).toBe("FAILED")
+        expect(document.parseErrorMessage).toBe(
+          "解析请求已中断，请重新解析文档"
+        )
+      } else {
+        expect(document.status).toBe("READY")
+        expect(document.chunkStatus).toBe("FAILED")
+        expect(document.chunkErrorMessage).toBe(
+          "索引请求已中断，请重新建立索引"
+        )
+      }
+      expect(mocks.es).not.toHaveBeenCalled()
+    }
+  )
+  it("identifies an empty upstream failure without logging request or response data", async () => {
+    const failure = Object.assign(new Error(""), {
+      name: "AI_APICallError",
+      statusCode: 403,
+      cause: new Error("private upstream response"),
+      requestBodyValues: {
+        apiKey: "private credential",
+        input: "private text",
+      },
+    })
+    mocks.embed.mockRejectedValue(failure)
+    await expect(processKnowledgeDocument(input)).rejects.toBe(failure)
+    expect(document.chunkStatus).toBe("FAILED")
+    expect(document.chunkErrorMessage).toContain("向量化（AI_APICallError）")
+    expect(console.error).toHaveBeenCalledExactlyOnceWith(
+      "Knowledge document indexing failed",
+      {
+        documentId: input.documentId,
+        stage: "向量化",
+        errorName: "AI_APICallError",
+        causeName: "Error",
+        statusCode: 403,
+      }
+    )
+    expect(mocks.es).not.toHaveBeenCalled()
+  })
   it("bounds parsing and records timeout even when a parser ignores cancellation", async () => {
     vi.useFakeTimers()
     const parsed = Promise.withResolvers<{
@@ -375,6 +443,14 @@ describe("direct document processing", () => {
       })
       expect(document.markdownContent).toBe(source.toString())
       expect(mocks.replace).not.toHaveBeenCalled()
+      expect(console.error).toHaveBeenCalledWith(
+        "Knowledge document indexing failed",
+        expect.objectContaining({
+          documentId: input.documentId,
+          stage: stage === "embedding" ? "向量化" : "Elasticsearch 写入",
+          errorName: "Error",
+        })
+      )
       if (stage === "embedding") expect(mocks.es).not.toHaveBeenCalled()
     }
   )
@@ -383,6 +459,10 @@ describe("direct document processing", () => {
     mocks.replace.mockRejectedValue(new Error("database write failed"))
     await expect(processKnowledgeDocument(input)).rejects.toThrow(
       "database write failed"
+    )
+    expect(console.error).toHaveBeenCalledWith(
+      "Knowledge document indexing failed",
+      expect.objectContaining({ stage: "数据库提交" })
     )
     expect(events).toEqual(["embedding", "es"])
     expect(document).toMatchObject({

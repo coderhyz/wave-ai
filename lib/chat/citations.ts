@@ -94,6 +94,14 @@ export function formatKnowledgeCitationText(
       return citation ? documentLink(citation) : title
     }
   )
+  // 研究报告的 [S1] 引用定义也需指向真实文档，复制和导出沿用相同链接。
+  formatted = formatted.replace(
+    /^ {0,3}(\[S\d+\]:[ \t]*)<?knowledge:\/\/document\/([a-zA-Z0-9_-]+)>?[ \t]*\r?$/gm,
+    (_match, label: string, id: string) => {
+      const citation = documents.get(id)
+      return citation ? label + getKnowledgeCitationHref(citation) : ""
+    }
+  )
   for (const citation of citations) {
     const title = citation.documentTitle.replace(/[.*+?^{}$()|[\]\\]/g, "\\$&")
     formatted = formatted.replace(

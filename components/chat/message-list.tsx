@@ -285,7 +285,7 @@ const ChatMessage = memo(function ChatMessage({
 
           if (part.type === "text") {
             return message.role === "assistant" ? (
-              <ChatMessageResponse key={key}>
+              <ChatMessageResponse key={key} citations={citations}>
                 {formatKnowledgeCitationText(part.text, citations)}
               </ChatMessageResponse>
             ) : (
@@ -296,7 +296,7 @@ const ChatMessage = memo(function ChatMessage({
           }
           return null
         })}
-        {!onShowSources && <KnowledgeCitations message={message} />}
+        <KnowledgeCitations message={message} />
         {onShowSources && sourceCount > 0 && !hasSearchActivity && (
           <Button variant="ghost" size="sm" className="mt-2 w-fit" onClick={() => onShowSources(message.id)}>
             <PanelRightOpen className="size-4" />来源 {sourceCount}

@@ -3,6 +3,10 @@
 import type { ComponentProps } from "react"
 import { MessageResponse } from "@/components/ai-elements/message"
 import { ArrowUpRight, Globe2 } from "lucide-react"
+import {
+  getKnowledgeCitationHref,
+  type getKnowledgeCitations,
+} from "@/lib/chat/citations"
 
 const referenceComponents = {
   ul: ({ children }: ComponentProps<"ul">) => (
@@ -32,11 +36,17 @@ const referenceComponents = {
 }
 
 /** 参考资料仅改变展示布局，原始 Markdown 仍用于复制、导出和保存。 */
-export function ChatMessageResponse({ children }: { children: string }) {
+export function ChatMessageResponse({
+  children,
+  citations = [],
+}: {
+  children: string
+  citations?: ReturnType<typeof getKnowledgeCitations>
+}) {
   // 忽略代码示例中的同名标题，只处理回答末尾的参考资料章节。
   const sections = Array.from(
     children.matchAll(
-      /```[\s\S]*?(?:```|(?![\s\S]))|~~~[\s\S]*?(?:~~~|(?![\s\S]))|^##[ \t]+(参考资料|来源列表)[ \t]*\r?$/gm
+      /```[\s\S]*?(?:```|(?![\s\S]))|~~~[\s\S]*?(?:~~~|(?![\s\S]))|^(?:#{1,6}[ \t]+)?(?:\*\*)?(参考资料|来源列表|引用来源)(?:\*\*)?[ \t]*[:：]?[ \t]*(?:\*\*)?[ \t]*\r?$/gm
     )
   )
   const section = sections.findLast((match) => match[1])
@@ -46,29 +56,55 @@ export function ChatMessageResponse({ children }: { children: string }) {
   if (!references) return <MessageResponse>{children}</MessageResponse>
 
   // 正文中的 [S1] 等引用仍需使用末尾的 Markdown 链接定义。
-  const definitions = references.match(/^ {0,3}\[S\d+\]:[^\r\n]+/gm) ?? []
+  const definitions: string[] =
+    references.match(/^ {0,3}\[S\d+\]:[^\r\n]+/gm) ?? []
+  const definedLabels = new Set(
+    definitions.map((definition) =>
+      definition.slice(0, definition.indexOf(":")).trim()
+    )
+  )
   const body = children.slice(0, section.index).trimEnd()
+  const citationHrefs = new Set(citations.map(getKnowledgeCitationHref))
+  // 已登记文档由 KnowledgeCitations 展示；正文引用定义和网页来源继续保留。
+  const visibleReferences = references
+    .replace(
+      /```[\s\S]*?(?:```|(?![\s\S]))|~~~[\s\S]*?(?:~~~|(?![\s\S]))|^ {0,3}(?:(?:[-*+]|\d+\.)[ \t]+)?(?:(\[S\d+\])[ \t]+)?\[(?:\\.|[^\]\\\n])*\]\((\/home\?[^)\n]+)\)[ \t]*\r?$/gm,
+      (line, label: string | undefined, href: string | undefined) => {
+        if (!href || !citationHrefs.has(href)) return line
+        if (label && !definedLabels.has(label)) {
+          definitions.push(`${label}: ${href}`)
+          definedLabels.add(label)
+        }
+        return ""
+      }
+    )
+    .replace(/^ {0,3}\[S\d+\]:[^\r\n]+/gm, "")
+    .trim()
 
   return (
     <>
       <MessageResponse mode="static">
         {body + "\n\n" + definitions.join("\n")}
       </MessageResponse>
-      <section
-        aria-label={section[1]}
-        className="mt-4 max-w-full min-w-0 border-t border-border/50 pt-3"
-      >
-        <h3 className="mb-2 text-xs font-medium text-muted-foreground">
-          {section[1]}
-        </h3>
-        <MessageResponse
-          mode="static"
-          className="flex h-auto flex-wrap gap-2 space-y-0 [&_[data-streamdown=link]]:block [&_[data-streamdown=link]]:max-w-64 [&_[data-streamdown=link]]:min-w-0 [&_[data-streamdown=link]]:truncate [&_[data-streamdown=link]]:text-sm [&_[data-streamdown=link]]:font-medium [&_[data-streamdown=link]]:text-foreground [&_[data-streamdown=link]]:no-underline [&_[data-streamdown=link]:focus-visible]:outline [&_[data-streamdown=link]:focus-visible]:outline-ring [&_[data-streamdown=link]:hover]:text-primary"
-          components={referenceComponents}
+      {visibleReferences && (
+        <section
+          aria-label={section[1]}
+          className="mt-4 max-w-full min-w-0 border-t border-border/50 pt-3"
         >
-          {references.replace(/^\[S\d+\][ \t]+/gm, "- $&")}
-        </MessageResponse>
-      </section>
+          <h3 className="mb-2 text-xs font-medium text-muted-foreground">
+            {section[1]}
+          </h3>
+          <MessageResponse
+            mode="static"
+            className="flex h-auto flex-wrap gap-2 space-y-0 [&_[data-streamdown=link]]:block [&_[data-streamdown=link]]:max-w-64 [&_[data-streamdown=link]]:min-w-0 [&_[data-streamdown=link]]:truncate [&_[data-streamdown=link]]:text-sm [&_[data-streamdown=link]]:font-medium [&_[data-streamdown=link]]:text-foreground [&_[data-streamdown=link]]:no-underline [&_[data-streamdown=link]:focus-visible]:outline [&_[data-streamdown=link]:focus-visible]:outline-ring [&_[data-streamdown=link]:hover]:text-primary"
+            components={referenceComponents}
+          >
+            {visibleReferences.replace(/^\[S\d+\][ \t]+/gm, "- $&") +
+              "\n\n" +
+              definitions.join("\n")}
+          </MessageResponse>
+        </section>
+      )}
     </>
   )
 }

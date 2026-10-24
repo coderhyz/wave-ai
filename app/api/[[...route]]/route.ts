@@ -23,6 +23,17 @@ app.onError((err, c) => {
     return err.getResponse()
   }
   console.error("Unhandled API error", err)
+  if (err.name === "ResponseTimeoutError") {
+    return c.json(
+      {
+        error: {
+          code: "OSS_TIMEOUT",
+          message: "文件存储服务响应超时，请稍后重试",
+        },
+      },
+      504
+    )
+  }
   return c.json({ error: "internal error" }, 500)
 })
 

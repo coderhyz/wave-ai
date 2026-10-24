@@ -19,7 +19,8 @@ export const getOssClient = () => {
       accessKeySecret: requireEnv("OSS_ACCESS_KEY_SECRET"),
       bucket: requireEnv("OSS_BUCKET"),
       secure: true,
-      timeout: 30_000,
+      // 给部署环境与 OSS 之间的文件传输留出时间，避免 30 秒提前超时。
+      timeout: 120_000,
       authorizationV4: true,
     })
   }

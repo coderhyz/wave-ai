@@ -21,7 +21,6 @@ import {
 } from "@/lib/knowledge/errors"
 import {
   requireFolderInKnowledgeBase,
-  requireOwnedKnowledgeBase,
   lockOwnedKnowledgeBase,
 } from "@/lib/knowledge/ownership"
 import { DOCUMENT_PROCESSING_TIMEOUT_MS } from "@/lib/knowledge/documents/timeouts"
@@ -31,13 +30,14 @@ import { KnowledgeParseError } from "@/lib/knowledge/parsers/types"
 import { inspectKnowledgeFile } from "@/lib/knowledge/parsers/registry"
 import { titleFromFilename } from "@/lib/knowledge/parsers/normalize"
 import type {
+  PrepareKnowledgeDocumentUploadInput,
   ReparseKnowledgeDocumentInput,
   RenameKnowledgeDocumentInput,
 } from "@/lib/knowledge/schemas"
 import {
-  deleteOssObject,
+  copyOssObject,
   getOssObject,
-  putOssObject,
+  getOssUploadUrl,
   getOssPreviewUrl,
 } from "@/lib/storage/oss"
 
@@ -76,101 +76,147 @@ const sanitizeFilename = (filename: string) => {
     .slice(0, 255)
   return sanitized || "未命名文件"
 }
+export const prepareKnowledgeDocumentUpload = async (
+  userId: string,
+  knowledgeBaseId: string,
+  input: PrepareKnowledgeDocumentUploadInput
+) => {
+  const id = randomUUID()
+  const filename = sanitizeFilename(input.filename)
+  const storageKey = `knowledge-uploads/${userId}/${knowledgeBaseId}/${id}`
+  const sourceKey = `knowledge-documents/${userId}/${knowledgeBaseId}/${id}`
+  const expires = 10 * 60
+  const expiresAt = Date.now() + expires * 1000
+
+  await prisma.$transaction(async (db) => {
+    await lockOwnedKnowledgeBase(db, userId, knowledgeBaseId)
+    if (input.folderId)
+      await requireFolderInKnowledgeBase(db, knowledgeBaseId, input.folderId)
+    // 先登记清理记录，浏览器关闭或直传失败也不会丢失原件的清理线索。
+    await db.documentProcessingJob.createMany({
+      data: [
+        {
+          id,
+          knowledgeBaseId,
+          type: "CLEANUP",
+          dedupeKey: `cleanup:upload:${id}`,
+          availableAt: new Date(expiresAt + DOCUMENT_PROCESSING_TIMEOUT_MS),
+          // 临时对象始终延后清理，不参与已完成文档的即时清理。
+          payload: { ...input, filename, storageKey, sourceKey, userId },
+        },
+        {
+          knowledgeBaseId,
+          type: "CLEANUP",
+          dedupeKey: `cleanup:upload-source:${id}`,
+          availableAt: new Date(expiresAt + DOCUMENT_PROCESSING_TIMEOUT_MS),
+          payload: { storageKey: sourceKey, documentId: id },
+        },
+      ],
+    })
+  })
+
+  return {
+    uploadId: id,
+    ...(await getOssUploadUrl(
+      storageKey,
+      input.mimeType,
+      input.sizeBytes,
+      expires
+    )),
+  }
+}
 
 export const createKnowledgeDocumentUpload = async ({
   userId,
   knowledgeBaseId,
-  folderId,
-  filename,
-  mimeType,
-  buffer,
+  uploadId,
   signal,
 }: {
   userId: string
   knowledgeBaseId: string
-  folderId: string | null
-  filename: string
-  mimeType: string
-  buffer: Buffer
+  uploadId: string
   signal?: AbortSignal
 }) => {
   signal?.throwIfAborted()
-  // 先规范文件名并检查扩展名、MIME 和文件签名是否属于支持的格式。
-  const originalFileName = sanitizeFilename(filename)
+  const pending = await prisma.documentProcessingJob.findFirst({
+    where: {
+      id: uploadId,
+      knowledgeBaseId,
+      type: "CLEANUP",
+      status: "PENDING",
+      dedupeKey: `cleanup:upload:${uploadId}`,
+      availableAt: {
+        gt: new Date(Date.now() + DOCUMENT_PROCESSING_TIMEOUT_MS),
+      },
+      payload: { path: ["userId"], equals: userId },
+    },
+  })
+  if (!pending) throw knowledgeDocumentNotFound()
+  // payload 由上面的准备接口持久化，不接受客户端指定对象键或修改上传元数据。
+  const { filename, mimeType, folderId, sizeBytes, storageKey, sourceKey } =
+    pending.payload as PrepareKnowledgeDocumentUploadInput & {
+      storageKey: string
+      sourceKey: string
+    }
+  const buffer = await getOssObject(storageKey)
+  if (buffer.byteLength !== sizeBytes)
+    throw new KnowledgeParseError(
+      "FILE_SIGNATURE_MISMATCH",
+      "上传文件大小不一致，请重新上传"
+    )
+  const id = uploadId
+  const originalFileName = filename
   const inspected = inspectKnowledgeFile({
     buffer,
     filename: originalFileName,
     mimeType,
   })
 
-  // 上传前确认知识库和目标文件夹归属当前用户。
+  const checksumSha256 = createHash("sha256").update(buffer).digest("hex")
+  // 正式原件不暴露上传签名，防止旧签名在文档删除后重新写入同一路径。
+  await copyOssObject(storageKey, sourceKey, inspected.mimeType)
+  signal?.throwIfAborted()
   await prisma.$transaction(async (db) => {
-    await requireOwnedKnowledgeBase(db, userId, knowledgeBaseId)
+    // 与整库/目录删除串行，保证删除时能读到新文档的资源信息。
+    await lockOwnedKnowledgeBase(db, userId, knowledgeBaseId)
     if (folderId)
       await requireFolderInKnowledgeBase(db, knowledgeBaseId, folderId)
-  })
 
-  // 文档 ID 参与对象键生成，因此同名文件也不会互相覆盖。
-  const id = randomUUID()
-  const checksumSha256 = createHash("sha256").update(buffer).digest("hex")
-  // inspectKnowledgeFile 已确认扩展名在白名单中，无需再次正则检查。
-  const extension = originalFileName
-    .slice(originalFileName.lastIndexOf(".") + 1)
-    .toLowerCase()
-  const storageKey = `knowledge-documents/${userId}/${knowledgeBaseId}/${id}.${extension}`
-
-  // 原文件放在 OSS，数据库只保存对象键、大小和哈希。
-  signal?.throwIfAborted()
-  let sourceUploaded = false
-  try {
-    await putOssObject(storageKey, buffer, inspected.mimeType)
-    sourceUploaded = true
-    signal?.throwIfAborted()
-    await prisma.$transaction(async (db) => {
-      // 与整库/目录删除串行，保证删除时能读到新文档的资源信息。
-      await lockOwnedKnowledgeBase(db, userId, knowledgeBaseId)
-      if (folderId)
-        await requireFolderInKnowledgeBase(db, knowledgeBaseId, folderId)
-
-      // 先保存原件记录；解析与索引在事务提交后直接执行。
-      signal?.throwIfAborted()
-      await db.knowledgeDocument.create({
-        data: {
-          id,
-          knowledgeBaseId,
-          folderId,
-          title: titleFromFilename(originalFileName),
-          type: inspected.documentType,
-          status: "QUEUED",
-          originalFileName,
-          mimeType: inspected.mimeType,
-          sizeBytes: buffer.byteLength,
-          checksumSha256,
-          storageKey,
-        },
-        select: { id: true },
-      })
-
-      signal?.throwIfAborted()
+    // 与文档创建原子提交，阻止重复确认；事务失败时仍保留原清理记录。
+    const claimed = await db.documentProcessingJob.updateMany({
+      where: {
+        id: pending.id,
+        status: "PENDING",
+        dedupeKey: `cleanup:upload:${id}`,
+      },
+      data: { dedupeKey: `cleanup:uploaded:${id}` },
     })
-  } catch (error) {
-    // 原件已上传时立即补偿删除；上传结果未确认时保留安全窗口后的清理记录。
-    const cleanup = {
-      type: "CLEANUP" as const,
-      dedupeKey: `cleanup:${id}:${checksumSha256}`,
-      availableAt: new Date(
-        Date.now() + (sourceUploaded ? 0 : DOCUMENT_PROCESSING_TIMEOUT_MS)
-      ),
-      payload: { storageKey, documentId: id, reason: "upload-failed" },
-    }
-    if (!sourceUploaded)
-      await prisma.documentProcessingJob.create({ data: cleanup })
-    else
-      await deleteOssObject(storageKey).catch(() =>
-        prisma.documentProcessingJob.create({ data: cleanup })
-      )
-    throw error
-  }
+    if (claimed.count !== 1) throw knowledgeDocumentNotFound()
+    await db.documentProcessingJob.deleteMany({
+      where: { dedupeKey: `cleanup:upload-source:${id}`, status: "PENDING" },
+    })
+
+    // 先保存原件记录；解析与索引在事务提交后直接执行。
+    signal?.throwIfAborted()
+    await db.knowledgeDocument.create({
+      data: {
+        id,
+        knowledgeBaseId,
+        folderId,
+        title: titleFromFilename(originalFileName),
+        type: inspected.documentType,
+        status: "QUEUED",
+        originalFileName,
+        mimeType: inspected.mimeType,
+        sizeBytes: buffer.byteLength,
+        checksumSha256,
+        storageKey: sourceKey,
+      },
+      select: { id: true },
+    })
+
+    signal?.throwIfAborted()
+  })
 
   return processOwnedKnowledgeDocument(userId, id, 0, {
     source: buffer,

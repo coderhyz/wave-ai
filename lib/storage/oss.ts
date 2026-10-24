@@ -50,6 +50,45 @@ export const deleteOssObject = async (storageKey: string) => {
   await getOssClient().delete(storageKey)
 }
 
+/** OSS 内部复制，不经过应用服务器重新上传文件。 */
+export const copyOssObject = async (
+  sourceKey: string,
+  storageKey: string,
+  mediaType: string
+) => {
+  await getOssClient().copy(storageKey, sourceKey, {
+    headers: {
+      "Content-Type": mediaType,
+      "Cache-Control": "private, max-age=31536000, immutable",
+      "x-oss-metadata-directive": "REPLACE",
+      "x-oss-forbid-overwrite": "true",
+    },
+  })
+}
+
+/** 签名绑定临时对象、大小和请求头，限制单次上传的范围。 */
+export const getOssUploadUrl = async (
+  storageKey: string,
+  mediaType: string,
+  sizeBytes: number,
+  expires: number
+) => {
+  const headers = {
+    "Content-Type": mediaType || "application/octet-stream",
+    "Cache-Control": "private, max-age=31536000, immutable",
+    "x-oss-forbid-overwrite": "true",
+  }
+  const url = await getOssClient().signatureUrlV4(
+    "PUT",
+    expires,
+    { headers: { ...headers, "Content-Length": String(sizeBytes) } },
+    storageKey,
+    ["cache-control", "content-length"]
+  )
+  // Content-Length 由浏览器根据 File 自动设置，前端不能手动设置该请求头。
+  return { url, headers }
+}
+
 /** 使用现有客户端签发只读 URL；不签入 Range，允许 PDF 阅读器自行请求字节范围。 */
 export const getOssPreviewUrl = (storageKey: string, expires: number) =>
   getOssClient().signatureUrlV4(

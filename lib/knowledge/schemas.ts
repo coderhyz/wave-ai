@@ -1,6 +1,7 @@
 /** 知识库接口共用的 Zod 参数结构，使各路由保持一致的输入规则。 */
 import { z } from "zod"
 import { normalizeText } from "@/lib/knowledge/parsers/normalize"
+import { MAX_KNOWLEDGE_FILE_BYTES } from "@/lib/knowledge/parsers/types"
 
 /** 知识库与目录接口共用的基础字段约束。 */
 const knowledgeId = z.string().uuid()
@@ -28,6 +29,24 @@ export type SearchKnowledgeInput = z.infer<typeof searchKnowledgeSchema>
 
 /** 所有知识库和文件夹路径参数统一使用 UUID。 */
 export const knowledgeIdParamSchema = z.object({ id: knowledgeId }).strict()
+
+/** 直传只向业务接口提交元数据，文件字节由浏览器直接发送到 OSS。 */
+export const prepareKnowledgeDocumentUploadSchema = z
+  .object({
+    filename: z.string().trim().min(1).max(255),
+    mimeType: z.string().max(200),
+    sizeBytes: z.number().int().min(1).max(MAX_KNOWLEDGE_FILE_BYTES),
+    folderId: knowledgeId.nullable().default(null),
+  })
+  .strict()
+
+export const completeKnowledgeDocumentUploadSchema = z
+  .object({ uploadId: knowledgeId })
+  .strict()
+
+export type PrepareKnowledgeDocumentUploadInput = z.infer<
+  typeof prepareKnowledgeDocumentUploadSchema
+>
 
 /** 文件树重命名更新显示标题，不改变原文件类型和 OSS 对象键。 */
 export const renameKnowledgeDocumentSchema = z
